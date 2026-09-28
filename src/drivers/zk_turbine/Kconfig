@@ -1,0 +1,6 @@
+menuconfig DRIVERS_ZK_TURBINE
+	bool "ZK Turbine Driver"
+	default n
+	select SERIAL_PORT
+	help
+		Enable driver for ZK Turbine via UART.
