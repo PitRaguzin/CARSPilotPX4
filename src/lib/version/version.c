@@ -169,7 +169,10 @@ uint32_t version_tag_to_number(const char *tag)
 
 uint32_t px4_firmware_version(void)
 {
-	return version_tag_to_number(PX4_GIT_TAG_STR);
+	char version[3] = {1, 17, 1};
+	int firmware_type = FIRMWARE_TYPE_RELEASE;
+	return ((uint8_t)version[0] << 8 * 3) | ((uint8_t)version[1] << 8 * 2) | ((uint8_t)version[2] << 8 * 1) | firmware_type;
+//	return version_tag_to_number(PX4_GIT_TAG_STR);
 }
 
 uint32_t version_tag_to_vendor_version_number(const char *tag)
