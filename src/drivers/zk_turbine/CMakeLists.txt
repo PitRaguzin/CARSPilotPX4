@@ -6,8 +6,6 @@ px4_add_module(
 	COMPILE_FLAGS
 	SRCS
 		ZKTurbine.cpp
-	DEPENDS
-		px4_work_queue
 	MODULE_CONFIG
 		module.yaml
 )

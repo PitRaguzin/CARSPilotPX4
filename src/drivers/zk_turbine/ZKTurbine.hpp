@@ -7,11 +7,13 @@
 #include <px4_platform_common/px4_work_queue/ScheduledWorkItem.hpp>
 
 #include <uORB/Publication.hpp>
+#include <uORB/Subscription.hpp>
 #include <uORB/topics/internal_combustion_engine_status.h>
+#include <uORB/topics/vehicle_thrust_setpoint.h>
 
 #define PACKED __attribute__((__packed__))
 
-class ZKTurbine : public ModuleBase, public px4::ScheduledWorkItem
+class ZKTurbine : public ModuleBase//, public px4::ScheduledWorkItem
 {
 public:
     static ModuleBase::Descriptor desc;  ///< Статический дескриптор модуля, который требует архитектура PX4
@@ -25,7 +27,9 @@ public:
 
     bool init();
 
-    void Run() override; // Основной цикл обработки данных
+//    void Run() override; // Основной цикл обработки данных
+    static int task_main_trampoline(int argc, char *argv[]);
+    int task_main();
 
 private:
 ////////////////////////////// ОТПРАВКА ДАННЫХ (начало) //////////////////////////////
@@ -352,6 +356,9 @@ private:
     /// @brief Отправка телеметрии о турбине вверх
     void sendTelemetry();
 
+    /// @brief Закрытие последовательного порта
+    void closePort();
+
     int32_t _turbine_port_val{0};       ///< Переменная для хранения значения порта, прочитанного из параметров
     char _port[32];                     ///< Имя порта UART в системе
     int _fd{-1};                        ///< Дескриптор порта UART
@@ -359,6 +366,7 @@ private:
     uint8_t _buffer[64];                ///< Буфер для чтения данных из порта UART
 
     uORB::Publication<internal_combustion_engine_status_s> _efi_status_pub{ORB_ID(internal_combustion_engine_status)};
+    uORB::Subscription _thrust_sp_sub{ORB_ID(vehicle_thrust_setpoint)};
 
     SW_1 m_mode = SW_1::ControlEngineIntoStopState; ///< Значение режима, отправляемое в ECU
 

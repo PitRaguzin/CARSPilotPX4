@@ -2,6 +2,8 @@
 
 #include <termios.h>
 #include <fcntl.h>
+#include <poll.h>
+#include <sys/stat.h>
 
 #include <drivers/drv_hrt.h>
 #include <px4_platform_common/param.h>
@@ -11,24 +13,168 @@
 // Инициализация дескриптора модуля. Связываем функции с дескриптором. Использует constexpr конструктор: Descriptor(task_spawn, custom_command, print_usage)
 ModuleBase::Descriptor ZKTurbine::desc{task_spawn, custom_command, print_usage};
 
-ZKTurbine::ZKTurbine(const char *port_name) :
-    ScheduledWorkItem(MODULE_NAME, px4::wq_configurations::hp_default)
+ZKTurbine::ZKTurbine(const char *port_name) //:
+//    ScheduledWorkItem(MODULE_NAME, px4::wq_configurations::hp_default)
 {
-    PX4_INFO("ZK Turbine constructor with port name: %s", port_name);
+    PX4_INFO("Constructor with port name: %s", port_name);
     strncpy(_port, port_name, sizeof(_port));
 }
 
 ZKTurbine::~ZKTurbine()
 {
-    ScheduleClear();
-    if (_fd >= 0) {
-        close(_fd);
+//    ScheduleClear();
+    closePort();
+}
+
+int ZKTurbine::task_main_trampoline(int argc, char *argv[])
+{
+    ZKTurbine *instance = (ZKTurbine *)desc.object.load(); // Извлекаем указатель на созданный объект из дескриптора
+    if (instance) {
+        return instance->task_main();
     }
+    return PX4_ERROR;
+}
+
+int ZKTurbine::task_main()
+{
+    // Инициализация объекта класса
+    if (!init()) {
+        PX4_ERR("Init error");
+        desc.object.store(nullptr);
+        delete this;
+        return PX4_ERROR;
+    }
+
+    // Основной цикл программы
+    while (!should_exit()) {
+        // 1. Проверка обновления значения уровня подачи газа
+        if (_thrust_sp_sub.updated()) {
+            vehicle_thrust_setpoint_s thrust_sp;
+            if (_thrust_sp_sub.copy(&thrust_sp))
+                m_setThrottle = thrust_sp.xyz[0] * 1000; // Индекс 3 отвечает за газ (THROTTLE) во всех стандартных микшерах, значение от 0.0 до 1.0
+        }
+
+        // 2. Работа с турбиной
+        if (_fd >= 0) {
+            // 2.1. Отправка данных
+            uint8_t wr_bytes[4];
+            wr_bytes[0] = SendHeaderByte;
+            SendPacketData wr_packet;
+
+            // Уточнение значения отправляемого режима
+            m_mode = (m_setThrottle == 0) ? SW_1::ControlEngineIntoStandbyMode : SW_1::ControlEngineIntoRunningState;
+//            float outputnorm = SRV_Channels::get_output_norm(SRV_Channel::Aux_servo_function_t::k_rcin8);
+//            switch (m_mode)
+//            {
+//            case SW_1::ControlEngineIntoStopState:
+//            case SW_1::ControlEngineIntoStandbyMode:
+//            {
+//                if (outputnorm > 0)
+//                    m_mode = SW_1::ControlEngineIntoRunningState;
+//                break;
+//            }
+//            case SW_1::ControlEngineIntoRunningState:
+//            {
+//                if (outputnorm < 0)
+//                    m_mode = SW_1::ControlEngineIntoStandbyMode;
+//                break;
+//            }
+//            case SW_1::UartDoesNotControlEngine:
+//                break;
+//            }
+
+            wr_packet.Command.ID = (uint16_t)SendCommand::ID_1;
+            wr_packet.ID1Data.SW = (uint16_t)m_mode;
+            wr_packet.ID1Data.Throttle = m_setThrottle;//(m_mode == SW_1::ControlEngineIntoRunningState) ? static_cast<uint16_t>(SRV_Channels::get_output_scaled(SRV_Channel::k_throttle) * 10) : 0;
+            wr_bytes[1] = wr_packet.bytes[1];
+            wr_bytes[2] = wr_packet.bytes[0];
+            wr_bytes[3] = crc8(&wr_bytes[1], 2, 0);
+
+            ssize_t wr_res = write(_fd, wr_bytes, 4);
+            if (wr_res == -1) {
+                static uint64_t last_err_t = 0;
+                if (hrt_absolute_time() - last_err_t > 1000000) {
+                    struct stat st;
+                    int fstat_res = fstat(_fd, &st);
+                    PX4_ERR("Failed to write UART port %s: descriptor=%d, fstat_res=%d, errno=%d", _port, _fd, fstat_res, errno);
+                    last_err_t = hrt_absolute_time();
+                }
+            }
+
+            // 2.2. Чтение данных
+            struct pollfd fds[1];
+            fds[0].fd = _fd;
+            fds[0].events = POLLIN;
+            int pres = poll(fds, 1, 10); // Ждем данные до 10 мс внутри своего потока
+
+            if (pres > 0 && (fds[0].revents & POLLIN)) {
+                int rd_res = read(_fd, &_buffer[_offset], sizeof(_buffer) - sizeof(_buffer[0]) * _offset);
+
+                if (rd_res > 0)
+                {
+                    _offset+= rd_res;
+                    int local_offset = 0;
+                    while (_offset > local_offset && _offset - local_offset >= 7) {
+
+                        while (local_offset < _offset && _buffer[local_offset] >> 4 != ReadHeader)
+                            local_offset++;
+
+                        if (_offset - local_offset >= 7)
+                        {
+                            ReceivePacket rd_packet;
+                            memcpy(&rd_packet.bytes, &_buffer[local_offset], sizeof(rd_packet.bytes));
+                            if (rd_packet.data.Command < (uint8_t)ReadCommand::ID_1 ||  // Если идентификатор команды меньше известного нам
+                                rd_packet.data.Command > (uint8_t)ReadCommand::ID_9 ||  // ... или больше известного нам
+                                !checkPacket(rd_packet))                                // ... или пакет не прошёл проверку целостности
+                            {                                                           // .., значит мы за заголовок приняли часть предыдущего пакета
+                                local_offset++;
+                                continue;
+                            }
+
+                            parseData(rd_packet);
+                            if (rd_packet.data.Command == (uint8_t)ReadCommand::ID_9)
+                                sendTelemetry();
+
+                            local_offset+= sizeof(rd_packet.bytes);
+                        }
+                    }
+
+                    if (local_offset > 0)
+                    {
+                        int remain = _offset - local_offset;
+                        if (remain > 0)
+                            memmove(_buffer, &_buffer[local_offset], remain);
+                        _offset = remain;
+                    }
+                }
+                else if (rd_res < 0) {
+                    if (errno != EAGAIN) {
+                        static uint64_t last_r_err = 0;
+                        if (hrt_absolute_time() - last_r_err > 1000000) {
+                            PX4_ERR("Failed to read port %s: errno=%d", _port, errno);
+                            last_r_err = hrt_absolute_time();
+                        }
+                    }
+                }
+            }
+        }
+
+        px4_usleep(20000);
+    }
+
+    PX4_INFO("Finishing thread...");
+
+    desc.task_id = -1;
+    desc.object.store(nullptr);
+
+    delete this;
+
+    return PX4_OK;
 }
 
 bool ZKTurbine::init()
 {
-    PX4_INFO("ZK Turbine initializing...");
+    PX4_INFO("Initializing...");
 
 //	// Динамически ищем параметр в системе по его текстовому имени
 //	param_t param_handle = param_find("SENS_ZK_CFG");
@@ -47,8 +193,7 @@ bool ZKTurbine::init()
 //		return false;
 //	}
 
-    if (_port == nullptr || strlen(_port) == 0)
-    {
+    if (_port == nullptr || strlen(_port) == 0) {
         PX4_ERR("Failed to open empty UART port name.");
         return false;
     }
@@ -58,111 +203,136 @@ bool ZKTurbine::init()
         PX4_ERR("Failed to open UART port %s", _port);
         return false;
     }
+    PX4_INFO("Port %s opened with descriptor = %d", _port, _fd);
+
+    tcflush(_fd, TCIOFLUSH);
 
     // Настройка параметров порта (Baudrate, 8N1 и т.д.)
     struct termios uart_config;
     tcgetattr(_fd, &uart_config);
-    cfsetispeed(&uart_config, B115200);
-    cfsetospeed(&uart_config, B115200);
+    cfsetispeed(&uart_config, B9600);
+    cfsetospeed(&uart_config, B9600);
     uart_config.c_cflag &= ~(PARENB | CSTOPB | CSIZE);
     uart_config.c_cflag |= CS8 | CLOCAL | CREAD;
+    uart_config.c_cflag &= ~CRTSCTS;
     tcsetattr(_fd, TCSANOW, &uart_config);
 
-//    ScheduleNow();
-    ScheduleOnInterval(20000); // Запуск периодического выполнения (например, каждые 20 мс / 50 Гц)
+    tcflush(_fd, TCIOFLUSH);
 
-    PX4_INFO("ZK Turbine initialized successfully");
+    PX4_INFO("Initialized successfully");
 
     return true;
 }
 
-void ZKTurbine::Run()
-{
-    static int counter = 3;
-    if (counter-- > 0)
-        PX4_INFO("ZK Turbine periodic function start");
-
-    if (should_exit()) {
-        ScheduleClear();
-        ModuleBase::exit_and_cleanup(desc);
-        return;
-    }
-
-    // Отправка пакета
-    uint8_t wr_bytes[4];
-    wr_bytes[0] = SendHeaderByte;
-    SendPacketData wr_packet;
-
-//    // Уточнение значения отправляемого режима
-//    float outputnorm = SRV_Channels::get_output_norm(SRV_Channel::Aux_servo_function_t::k_rcin8);
-//    switch (m_mode)
-//    {
-//    case SW_1::ControlEngineIntoStopState:
-//    case SW_1::ControlEngineIntoStandbyMode:
-//    {
-//        if (outputnorm > 0)
-//            m_mode = SW_1::ControlEngineIntoRunningState;
-//        break;
+//void ZKTurbine::Run()
+//{
+//    static int counter = 3;
+//    if (counter-- > 0)
+//        PX4_INFO("Periodic function start");
+//
+//    if (should_exit()) {
+//        ScheduleClear();
+////        closePort();
+////        ModuleBase::exit_and_cleanup(desc);
+//        return;
 //    }
-//    case SW_1::ControlEngineIntoRunningState:
+//
+//    // Отправка пакета
+//    uint8_t wr_bytes[4];
+//    wr_bytes[0] = SendHeaderByte;
+//    SendPacketData wr_packet;
+//
+////    // Уточнение значения отправляемого режима
+////    float outputnorm = SRV_Channels::get_output_norm(SRV_Channel::Aux_servo_function_t::k_rcin8);
+////    switch (m_mode)
+////    {
+////    case SW_1::ControlEngineIntoStopState:
+////    case SW_1::ControlEngineIntoStandbyMode:
+////    {
+////        if (outputnorm > 0)
+////            m_mode = SW_1::ControlEngineIntoRunningState;
+////        break;
+////    }
+////    case SW_1::ControlEngineIntoRunningState:
+////    {
+////        if (outputnorm < 0)
+////            m_mode = SW_1::ControlEngineIntoStandbyMode;
+////        break;
+////    }
+////    case SW_1::UartDoesNotControlEngine:
+////        break;
+////    }
+//
+//    // Отправка данных
+//    wr_packet.Command.ID = (uint16_t)SendCommand::ID_1;
+//    wr_packet.ID1Data.SW = (uint16_t)SW_1::UartDoesNotControlEngine;//m_mode;
+//    wr_packet.ID1Data.Throttle = 0;//(m_mode == SW_1::ControlEngineIntoRunningState) ? static_cast<uint16_t>(SRV_Channels::get_output_scaled(SRV_Channel::k_throttle) * 10) : 0;
+//    m_setThrottle = wr_packet.ID1Data.Throttle;
+//    wr_bytes[1] = wr_packet.bytes[1];
+//    wr_bytes[2] = wr_packet.bytes[0];
+//    wr_bytes[3] = crc8(&wr_bytes[1], 2, 0);
+//
+//    ssize_t wr_res = write(_fd, wr_bytes, 4);
+//    if (wr_res == -1) {
+//        static uint64_t last_err_t = 0;
+//        if (hrt_absolute_time() - last_err_t > 1000000) {
+//            PX4_ERR("Failed to write UART port %s: errno=%d", _port, errno);
+//            last_err_t = hrt_absolute_time();
+//        }
+//    }
+//
+//    // Чтение данных из UART
+//    int rd_res = read(_fd, &_buffer[_offset], sizeof(_buffer) - sizeof(_buffer[0]) * _offset);
+//    if (rd_res > 0)
 //    {
-//        if (outputnorm < 0)
-//            m_mode = SW_1::ControlEngineIntoStandbyMode;
-//        break;
+//        _offset+= rd_res;
+//        int local_offset = 0;
+//        while (_offset > local_offset && _offset - local_offset >= 7) {
+//
+//            while (local_offset < _offset && _buffer[local_offset] != ReadHeader)
+//                local_offset++;
+//
+//            if (_offset - local_offset >= 7)
+//            {
+//                ReceivePacket rd_packet;
+//                memcpy(&rd_packet.bytes, &_buffer[local_offset], sizeof(rd_packet.bytes));
+//                if (rd_packet.data.Command < (uint8_t)ReadCommand::ID_1 ||  // Если идентификатор команды меньше известного нам
+//                    rd_packet.data.Command > (uint8_t)ReadCommand::ID_9 ||  // ... или больше известного нам
+//                    !checkPacket(rd_packet))                                // ... или пакет не прошёл проверку целостности
+//                {                                                           // .., значит мы за заголовок приняли часть предыдущего пакета
+//                    local_offset++;
+//                    continue;
+//                }
+//
+//                parseData(rd_packet);
+//                if (rd_packet.data.Command == (uint8_t)ReadCommand::ID_9)
+//                    sendTelemetry();
+//
+//                local_offset+= sizeof(rd_packet.bytes);
+//            }
+//        }
+//
+//        if (local_offset > 0)
+//        {
+//            int remain = _offset - local_offset;
+//            if (remain > 0)
+//                memmove(_buffer, &_buffer[local_offset], remain);
+//            _offset = remain;
+//        }
 //    }
-//    case SW_1::UartDoesNotControlEngine:
-//        break;
+//    else if (rd_res < 0) {
+//        if (errno != EAGAIN) {
+//            static uint64_t last_r_err = 0;
+//            if (hrt_absolute_time() - last_r_err > 1000000) {
+//                PX4_ERR("Failed to read port %s: errno=%d", _port, errno);
+//                last_r_err = hrt_absolute_time();
+//            }
+//        }
 //    }
-
-    // Отправка данных
-    wr_packet.Command.ID = (uint16_t)SendCommand::ID_1;
-    wr_packet.ID1Data.SW = (uint16_t)SW_1::UartDoesNotControlEngine;//m_mode;
-    wr_packet.ID1Data.Throttle = 0;//(m_mode == SW_1::ControlEngineIntoRunningState) ? static_cast<uint16_t>(SRV_Channels::get_output_scaled(SRV_Channel::k_throttle) * 10) : 0;
-    m_setThrottle = wr_packet.ID1Data.Throttle;
-    wr_bytes[1] = wr_packet.bytes[1];
-    wr_bytes[2] = wr_packet.bytes[0];
-    wr_bytes[3] = crc8(&wr_bytes[1], 2, 0);
-
-    ssize_t wr_res = write(_fd, wr_bytes, 4);
-    if (wr_res == -1)
-        PX4_ERR("Failed to write UART port %s: errno=%d", _port, errno);
-
-    // Чтение данных из UART
-    _offset+= read(_fd, &_buffer[_offset], sizeof(_buffer) - sizeof(_buffer[0]) * _offset);
-
-    int local_offset = 0;
-    while (_offset > local_offset && _offset - local_offset >= 7) {
-
-        while (_buffer[local_offset] != ReadHeader)
-            local_offset++;
-
-        if (_offset - local_offset >= 7)
-        {
-            ReceivePacket rd_packet;
-            memcpy(&rd_packet.bytes, &_buffer[local_offset], sizeof(rd_packet.bytes));
-            if (rd_packet.data.Command < (uint8_t)ReadCommand::ID_1 ||  // Если идентификатор команды меньше известного нам
-                rd_packet.data.Command > (uint8_t)ReadCommand::ID_9 ||  // ... или больше известного нам
-                !checkPacket(rd_packet))                                // ... или пакет не прошёл проверку целостности
-            {                                                           // .., значит мы за заголовок приняли часть предыдущего пакета
-                local_offset++;
-                continue;
-            }
-
-            parseData(rd_packet);
-            if (rd_packet.data.Command == (uint8_t)ReadCommand::ID_9)
-                sendTelemetry();
-
-            local_offset+= sizeof(rd_packet.bytes);
-        }
-    }
-
-    if (local_offset > 0)
-    {
-        for (int i = local_offset;i < _offset - local_offset;i++)
-            _buffer[i] = _buffer[local_offset + i];
-        _offset-= local_offset;
-    }
-}
+//
+////    ScheduleDelayed(10000);
+//    ScheduleOnInterval(20000);
+//}
 
 bool ZKTurbine::checkPacket(const ReceivePacket &p) const
 {
@@ -171,6 +341,7 @@ bool ZKTurbine::checkPacket(const ReceivePacket &p) const
 
 void ZKTurbine::parseData(ReceivePacket p)
 {
+    PX4_INFO("Parsing data: ID=%d",p.data.Command);
     m_rpm = (uint32_t)p.data.RPM * 10;
     switch ((ReadCommand)p.data.Command)
     {
@@ -324,9 +495,21 @@ void ZKTurbine::sendTelemetry()
 //    efi.pt_compensation                      = 0;
 }
 
+void ZKTurbine::closePort()
+{
+    if (_fd >= 0) {
+        if (close(_fd) == 0) {
+            _fd = -1;
+            PX4_INFO("Port %s closed successfully.", _port);
+        }
+        else
+            PX4_ERR("Close port %s error: %d.", _port, errno);
+    }
+}
+
 int ZKTurbine::task_spawn(int argc, char *argv[])
 {
-    const char *port = "/dev/ttyS3";
+    char *port = nullptr;
 
     if (argc > 1)
     {
@@ -339,27 +522,50 @@ int ZKTurbine::task_spawn(int argc, char *argv[])
                 default:                    break;
             }
         }
-//        for (int i = 1;i < argc;i+=2)
-//        {
-//            if (strcmp("-d", argv[i]) == 0 && i+1 < argc)
-//                port = argv[i+1];
-//        }
     }
+    optind = 0;
 
-    ZKTurbine *instance = new ZKTurbine(port);
-    if (!instance) {
-        PX4_ERR("alloc failed");
+    if (port == nullptr || strlen(port) == 0) {
+        PX4_ERR("Empty port name");
         return PX4_ERROR;
     }
 
-    if (!instance->init()) {
+    ZKTurbine *instance = new ZKTurbine(port);
+
+    if (!instance) {
+        PX4_ERR("Alloc failed");
+        return PX4_ERROR;
+    }
+
+//    if (!instance->init()) {
+//        PX4_ERR("Init error");
+//        desc.object.store(nullptr);
+//        delete instance;
+//        return PX4_ERROR;
+//    }
+
+    desc.object.store(instance);
+
+    int task_id = px4_task_spawn_cmd(
+        "zk_turbine_thread",                // Имя потока в ОС
+        SCHED_DEFAULT,                      // Планировщик
+        SCHED_PRIORITY_DEFAULT,             // Приоритет драйвера
+        2000,                               // Размер стека в байтах
+        &ZKTurbine::task_main_trampoline,   // Точка входа
+        (char *const *)argv
+    );
+
+    if (task_id < 0) {
+        PX4_ERR("Task spawn failed");
+        desc.object.store(nullptr);
         delete instance;
         return PX4_ERROR;
     }
 
-    desc.object.store(instance);
-    desc.task_id = task_id_is_work_queue;
+    desc.task_id = task_id;
 
+//    instance->ScheduleNow();
+//    ScheduleOnInterval(20000); // Запуск периодического выполнения (например, каждые 20 мс / 50 Гц)
     return PX4_OK;
 }
 
@@ -382,6 +588,5 @@ extern "C" __EXPORT int zk_turbine_main(int argc, char *argv[]);
 
 int zk_turbine_main(int argc, char *argv[])
 {
-    PX4_INFO("ZKTurbine_main() starting...");
     return ModuleBase::main(ZKTurbine::desc, argc, argv);
 }
