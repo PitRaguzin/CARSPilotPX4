@@ -8,8 +8,6 @@
 #include <drivers/drv_hrt.h>
 #include <px4_platform_common/param.h>
 
-//PARAM_DEFINE_INT32(SENS_ZK_CFG, 0);
-
 // Инициализация дескриптора модуля. Связываем функции с дескриптором. Использует constexpr конструктор: Descriptor(task_spawn, custom_command, print_usage)
 ModuleBase::Descriptor ZKTurbine::desc{task_spawn, custom_command, print_usage};
 
@@ -350,56 +348,85 @@ void ZKTurbine::sendTelemetry()
     memset(&efi, 0, sizeof(efi));
 
 	// Заполняем поля, которые подходят под параметры турбины:
-	efi.engine_speed_rpm = static_cast<float>(m_rpm);       // Обороты турбины (RPM)
-	efi.ecu_index = 0;                                      // Индекс ECU (для QGC)
-	efi.fuel_consumption_rate_cm3pm = m_flowRate * 1000;    // Расход топлива (см³/мин)
-	efi.exhaust_gas_temperature = m_exhTemperature;         // Температура (EGT) в °C
+    efi.timestamp                           = hrt_absolute_time();    // Обязательный системный таймштамп PX4
+	efi.flags;
+	efi.engine_speed_rpm                    = static_cast<float>(m_rpm);       // Обороты турбины (RPM)
+	efi.spark_dwell_time_ms                 = 0;
+	efi.atmospheric_pressure_kpa            = 0;
+	efi.intake_manifold_pressure_kpa        = 0;
+	efi.intake_manifold_temperature         = 0;
+	efi.coolant_temperature                 = 0;
+	efi.oil_pressure                        = m_pressure / 1000.0;
+	efi.oil_temperature                     = 0;
+	efi.fuel_pressure                       = 0;
+	efi.fuel_consumption_rate_cm3pm         = m_flowRate * 1000;
+	efi.estimated_consumed_fuel_volume_cm3  = m_flowTotal * 1000;
+	efi.ignition_timing_deg                 = 0;
+	efi.injection_time_ms                   = 0;
+	efi.cylinder_head_temperature           = 0;
+	efi.exhaust_gas_temperature             = m_exhTemperature;
+	efi.lambda_coefficient                  = 0;
+	efi.pid_idle_rpm_integral               = (!_is_armed) ? internal_combustion_engine_status_s::SUBSTATE_REST :
+                                              (_is_work) ? internal_combustion_engine_status_s::SUBSTATE_RUN :
+                                              internal_combustion_engine_status_s::SUBSTATE_IDLE;
+	efi.state                               = (m_error != ErrorCode::NoError) ? internal_combustion_engine_status_s::STATE_FAULT :
+                                              (m_state == EngineStatusCode::Stop) ? internal_combustion_engine_status_s::STATE_STOPPED :
+                                              internal_combustion_engine_status_s::STATE_RUNNING;
+	efi.substate;
+	efi.engine_load_percent                 = (m_maxRPM == 0) ? 0 : static_cast<uint8_t>(m_rpm * 100 / m_maxRPM);
+	efi.throttle_position_percent           = m_setThrottle / 10;
+	efi.ecu_index                           = 0;
+	efi.spark_plug_usage                    = (m_error == ErrorCode::MainValveFailure) ? internal_combustion_engine_status_s::SPARK_PLUG_SECOND_ACTIVE :
+                                              (m_error == ErrorCode::IgnitionValveFailure) ? internal_combustion_engine_status_s::SPARK_PLUG_FIRST_ACTIVE :
+                                              internal_combustion_engine_status_s::SPARK_PLUG_BOTH_ACTIVE;
+
+    // Код из нашего ardupilot (CarsPilot)
+//        internal_state.last_updated_ms                      = AP_HAL::millis();
+//        internal_state.engine_state                         = (m_error != ErrorCode::NoError) ? Engine_State::FAULT :
+//                                                              (m_state == EngineStatusCode::Stop) ? Engine_State::STOPPED : Engine_State::RUNNING;
+//        internal_state.general_error                        = (m_error != ErrorCode::NoError);
+//        internal_state.crankshaft_sensor_status             = Crankshaft_Sensor_Status::NOT_SUPPORTED;
+//        internal_state.temperature_status                   = (m_error == ErrorCode::ExhaustTemperatureIsHigh) ? Temperature_Status::ABOVE_NOMINAL :
+//                                                              (m_error == ErrorCode::PumpControllerTemperatureIsHigh ||
+//                                                               m_error == ErrorCode::StarterControllerTemperatureIsHigh) ? Temperature_Status::EGT_ABOVE_NOMINAL :
+//                                                              (m_error == ErrorCode::ExhaustTemperatureIsLow) ? Temperature_Status::BELOW_NOMINAL :
+//                                                              (m_error == ErrorCode::ExhaustGasTemperatureSensorFailure) ? Temperature_Status::OVERHEATING : Temperature_Status::OK;
+//        internal_state.fuel_pressure_status                 = (m_error == ErrorCode::PumpFailure ||
+//                                                               m_error == ErrorCode::PumpControllerTemperatureIsHigh) ? Fuel_Pressure_Status::BELOW_NOMINAL : Fuel_Pressure_Status::OK;
+//        internal_state.oil_pressure_status                  = (m_error == ErrorCode::IgnitionValveFailure ||
+//                                                               m_error == ErrorCode::MainValveFailure) ? Oil_Pressure_Status::BELOW_NOMINAL : Oil_Pressure_Status::OK;
+//        internal_state.detonation_status                    = (m_error == ErrorCode::GlowplugFailure ||
+//                                                               m_error == ErrorCode::StarterFailure) ? Detonation_Status::OBSERVED : Detonation_Status::NOT_OBSERVED;
+//        internal_state.misfire_status                       = (m_error == ErrorCode::ClutchFailure ||
+//                                                               m_error == ErrorCode::StarterFailure) ? Misfire_Status::OBSERVED : Misfire_Status::NOT_OBSERVED;
+//        internal_state.debris_status                        = Debris_Status::NOT_SUPPORTED;
+//        internal_state.engine_load_percent                  = (m_maxRPM == 0) ? 0 : static_cast<uint8_t>(m_rpm * 100 / m_maxRPM);
+//        internal_state.engine_speed_rpm                     = m_rpm;
+//        internal_state.spark_dwell_time_ms                  = 0;
+//        internal_state.atmospheric_pressure_kpa             = 0;
+//        internal_state.intake_manifold_pressure_kpa         = 0;
+//        internal_state.intake_manifold_temperature          = 0;
+//        internal_state.coolant_temperature                  = 0;
+//        internal_state.oil_pressure                         = m_pressure / 1000.0;
+//        internal_state.oil_temperature                      = 0;
+//        internal_state.fuel_pressure                        = 0;
+//        internal_state.fuel_consumption_rate_cm3pm          = m_flowRate / 1000;
+//        internal_state.estimated_consumed_fuel_volume_cm3   = m_flowTotal / 1000;
+//        internal_state.throttle_position_percent            = m_setThrottle / 10;
+//        internal_state.ecu_index                            = 0;
+//        internal_state.spark_plug_usage                     = (m_error == ErrorCode::MainValveFailure) ? Spark_Plug_Usage::SECOND_ACTIVE :
+//                                                              (m_error == ErrorCode::IgnitionValveFailure) ? Spark_Plug_Usage::FIRST_ACTIVE : Spark_Plug_Usage::BOTH_ACTIVE;
+//        internal_state.cylinder_status.cylinder_head_temperature    = 0;
+//        internal_state.cylinder_status.exhaust_gas_temperature      = C_TO_KELVIN(m_exhTemperature);
+//        internal_state.cylinder_status.ignition_timing_deg          = 0;
+//        internal_state.cylinder_status.injection_time_ms            = 0;
+//        internal_state.cylinder_status.lambda_coefficient           = 0;
+//        internal_state.ignition_voltage                     = m_ignPumpVoltage;
+//        internal_state.throttle_out                         = m_throttle;
+//        internal_state.pt_compensation                      = 0;
 
 	_efi_status_pub.publish(efi); // Публикуем в uORB. Модуль MAVLink подхватит это автоматически!
 
-//    efi.timestamp                            = hrt_absolute_time();    // Обязательный системный таймштамп PX4
-//    efi.engine_state                         = (m_error != ErrorCode::NoError) ? Engine_State::FAULT :
-//                                               (m_state == EngineStatusCode::Stop) ? Engine_State::STOPPED : Engine_State::RUNNING;
-//    efi.general_error                        = (m_error != ErrorCode::NoError);
-//    efi.crankshaft_sensor_status             = Crankshaft_Sensor_Status::NOT_SUPPORTED;
-//    efi.temperature_status                   = (m_error == ErrorCode::ExhaustTemperatureIsHigh) ? Temperature_Status::ABOVE_NOMINAL :
-//                                               (m_error == ErrorCode::PumpControllerTemperatureIsHigh ||
-//                                                m_error == ErrorCode::StarterControllerTemperatureIsHigh) ? Temperature_Status::EGT_ABOVE_NOMINAL :
-//                                               (m_error == ErrorCode::ExhaustTemperatureIsLow) ? Temperature_Status::BELOW_NOMINAL :
-//                                               (m_error == ErrorCode::ExhaustGasTemperatureSensorFailure) ? Temperature_Status::OVERHEATING : Temperature_Status::OK;
-//    efi.fuel_pressure_status                 = (m_error == ErrorCode::PumpFailure ||
-//                                                m_error == ErrorCode::PumpControllerTemperatureIsHigh) ? Fuel_Pressure_Status::BELOW_NOMINAL : Fuel_Pressure_Status::OK;
-//    efi.oil_pressure_status                  = (m_error == ErrorCode::IgnitionValveFailure ||
-//                                                m_error == ErrorCode::MainValveFailure) ? Oil_Pressure_Status::BELOW_NOMINAL : Oil_Pressure_Status::OK;
-//    efi.detonation_status                    = (m_error == ErrorCode::GlowplugFailure ||
-//                                                m_error == ErrorCode::StarterFailure) ? Detonation_Status::OBSERVED : Detonation_Status::NOT_OBSERVED;
-//    efi.misfire_status                       = (m_error == ErrorCode::ClutchFailure ||
-//                                                m_error == ErrorCode::StarterFailure) ? Misfire_Status::OBSERVED : Misfire_Status::NOT_OBSERVED;
-//    efi.debris_status                        = Debris_Status::NOT_SUPPORTED;
-//    efi.engine_load_percent                  = (m_maxRPM == 0) ? 0 : static_cast<uint8_t>(m_rpm * 100 / m_maxRPM);
-//    efi.engine_speed_rpm                     = m_rpm;
-//    efi.spark_dwell_time_ms                  = 0;
-//    efi.atmospheric_pressure_kpa             = 0;
-//    efi.intake_manifold_pressure_kpa         = 0;
-//    efi.intake_manifold_temperature          = 0;
-//    efi.coolant_temperature                  = 0;
-//    efi.oil_pressure                         = m_pressure / 1000.0;
-//    efi.oil_temperature                      = 0;
-//    efi.fuel_pressure                        = 0;
-//    efi.fuel_consumption_rate_cm3pm          = m_flowRate * 1000;
-//    efi.estimated_consumed_fuel_volume_cm3   = m_flowTotal * 1000;
-//    efi.throttle_position_percent            = m_setThrottle / 10;
-//    efi.ecu_index                            = 0;
-//    efi.spark_plug_usage                     = (m_error == ErrorCode::MainValveFailure) ? Spark_Plug_Usage::SECOND_ACTIVE :
-//                                               (m_error == ErrorCode::IgnitionValveFailure) ? Spark_Plug_Usage::FIRST_ACTIVE : Spark_Plug_Usage::BOTH_ACTIVE;
-//    efi.cylinder_status.cylinder_head_temperature    = 0;
-//    efi.cylinder_status.exhaust_gas_temperature      = m_exhTemperature + 273.15f;
-//    efi.cylinder_status.ignition_timing_deg          = 0;
-//    efi.cylinder_status.injection_time_ms            = 0;
-//    efi.cylinder_status.lambda_coefficient           = 0;
-//    efi.ignition_voltage                     = m_ignPumpVoltage;
-//    efi.throttle_out                         = m_throttle;
-//    efi.pt_compensation                      = 0;
 }
 
 void ZKTurbine::closePort()

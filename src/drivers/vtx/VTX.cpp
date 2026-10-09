@@ -55,6 +55,7 @@ VTX::VTX(const char *device) :
 {
 	if (device) {
 		strlcpy(_serial_path, device, sizeof(_serial_path));
+//		snprintf(_serial_path, sizeof(_serial_path), "%s", device);
 	}
 }
 
