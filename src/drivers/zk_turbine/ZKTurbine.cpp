@@ -347,9 +347,85 @@ void ZKTurbine::sendTelemetry()
     internal_combustion_engine_status_s efi;
     memset(&efi, 0, sizeof(efi));
 
+    uint32_t errors = 0;
+
+//    NoError = 0,                                ///< Нет ошибок
+//    TimeOut = 1,                                ///< Время истекло
+//    VoltageLow = 2,                             ///< Низкое напряжение
+//    GlowplugFailure = 3,                        ///< Ошибка свечи накаливания
+//    PumpFailure = 4,                            ///< Ошибка насоса
+//    StarterFailure = 5,                         ///< Ошибка стартера
+//    RPMLow = 6,                                 ///< Низкие оборосты двигателя
+//    RPMInstability = 7,                         ///< Нестабильная скорость вращения двигателя
+//    ExhaustTemperatureIsHigh = 8,               ///< Высокая температура выхлопных газов
+//    ExhaustTemperatureIsLow = 9,                ///< Низкая температура выхлопных газов
+//    ExhaustGasTemperatureSensorFailure = 10,    ///< Ошибка датчика температуры выхлопных газов
+//    IgnitionValveFailure = 11,                  ///< Ошибка клапана зажигания
+//    MainValveFailure = 12,                      ///< Ошибка главного клапана
+//    LossOfControlSignal = 13,                   ///< Потеря управляющего сигнала
+//    StarterControllerTemperatureIsHigh = 14,    ///< Высокая температура контроллера запуска
+//    PumpControllerTemperatureIsHigh = 15,       ///< Высокая температура контроллера насоса
+//    ClutchFailure = 16,                         ///< Ошибка сцепления (схватывания)
+//    CurrentOverload = 18,                       ///< Перегрузка по току
+//    EngineOffline = 19                          ///< Потеря связи
+
+//    1. Флаги ошибок датчиков и общие сбои
+// FLAG_GENERAL_ERROR (1) — Общая (неспецифицированная) ошибка ДВС.
+// FLAG_CRANKSHAFT_SENSOR_ERROR_SUPPORTED (2) — Флаг-индикатор: показывает, поддерживает ли ECU диагностику датчика коленвала.
+// FLAG_CRANKSHAFT_SENSOR_ERROR (4) — Ошибка/сбой датчика положения коленчатого вала.
+//    2. Флаги контроля температуры (Охл. жидкость / Выхлоп)
+// FLAG_TEMPERATURE_SUPPORTED (8) — Поддерживается ли мониторинг температуры.
+// FLAG_TEMPERATURE_BELOW_NOMINAL (16) — Температура двигателя ниже номинальной (мотор не прогрет).
+// FLAG_TEMPERATURE_ABOVE_NOMINAL (32) — Температура выше номинальной (предупреждение о перегреве).
+// FLAG_TEMPERATURE_OVERHEATING (64) — Критический перегрев двигателя.
+// FLAG_TEMPERATURE_EGT_ABOVE_NOMINAL (128) — Превышение температуры выхлопных газов (EGT).
+//    3. Флаги давления топлива
+// FLAG_FUEL_PRESSURE_SUPPORTED (256) — Поддерживается ли мониторинг давления топлива.
+// FLAG_FUEL_PRESSURE_BELOW_NOMINAL (512) — Низкое давление топлива (опасность обеднения смеси).
+// FLAG_FUEL_PRESSURE_ABOVE_NOMINAL (1024) — Слишком высокое давление топлива.
+//    4. Детонация и пропуски зажигания
+// FLAG_DETONATION_SUPPORTED (2048) — Поддерживается ли датчик детонации.
+// FLAG_DETONATION_OBSERVED (4096) — Обнаружена детонация в цилиндрах.
+// FLAG_MISFIRE_SUPPORTED (8192) — Поддерживается ли определение пропусков зажигания.
+// FLAG_MISFIRE_OBSERVED (16384) — Зафиксирован пропуск зажигания (misfire).
+//    5. Флаги давления масла
+// FLAG_OIL_PRESSURE_SUPPORTED (32768) — Поддерживается ли мониторинг давления масла.
+// FLAG_OIL_PRESSURE_BELOW_NOMINAL (65536) — Низкое давление масла (опасно для двигателя).
+// FLAG_OIL_PRESSURE_ABOVE_NOMINAL (131072) — Избыточное давление масла.
+//    6. Металлическая стружка (Debris) в масле
+// FLAG_DEBRIS_SUPPORTED (262144) — Поддерживается ли магнитный датчик стружки.
+// FLAG_DEBRIS_DETECTED (524288) — В масле обнаружена металлическая стружка (индикатор разрушения мотора).
+
+    // ТУДУ: пересмотреть флаги!!! Сделано по интуиции
+    errors |= internal_combustion_engine_status_s::FLAG_TEMPERATURE_SUPPORTED;
+    if (m_error == ErrorCode::ExhaustTemperatureIsLow) errors |= internal_combustion_engine_status_s::FLAG_TEMPERATURE_BELOW_NOMINAL;
+	if (m_error == ErrorCode::ExhaustTemperatureIsHigh) errors |= internal_combustion_engine_status_s::FLAG_TEMPERATURE_ABOVE_NOMINAL;
+	if (m_error == ErrorCode::ExhaustGasTemperatureSensorFailure) errors |= internal_combustion_engine_status_s::FLAG_TEMPERATURE_OVERHEATING;
+	if (m_error == ErrorCode::PumpControllerTemperatureIsHigh ||
+        m_error == ErrorCode::StarterControllerTemperatureIsHigh) errors |= internal_combustion_engine_status_s::FLAG_TEMPERATURE_EGT_ABOVE_NOMINAL;
+
+	errors |= internal_combustion_engine_status_s::FLAG_FUEL_PRESSURE_SUPPORTED;
+	if (m_error == ErrorCode::PumpFailure ||
+        m_error == ErrorCode::PumpControllerTemperatureIsHigh) errors |= internal_combustion_engine_status_s::FLAG_FUEL_PRESSURE_BELOW_NOMINAL;
+
+	errors |= internal_combustion_engine_status_s::FLAG_DETONATION_SUPPORTED;
+	if (m_error == ErrorCode::GlowplugFailure ||
+        m_error == ErrorCode::StarterFailure) errors |= internal_combustion_engine_status_s::FLAG_DETONATION_OBSERVED;
+
+	errors |= internal_combustion_engine_status_s::FLAG_MISFIRE_SUPPORTED;
+	if (m_error == ErrorCode::ClutchFailure ||
+        m_error == ErrorCode::StarterFailure) errors |= internal_combustion_engine_status_s::FLAG_MISFIRE_OBSERVED;
+
+	errors |= internal_combustion_engine_status_s::FLAG_OIL_PRESSURE_SUPPORTED;
+	if (m_error == ErrorCode::IgnitionValveFailure ||
+        m_error == ErrorCode::MainValveFailure) errors |= internal_combustion_engine_status_s::FLAG_OIL_PRESSURE_BELOW_NOMINAL;
+
+    if (m_error != ErrorCode::NoError && errors == 0)
+        errors |= internal_combustion_engine_status_s::FLAG_GENERAL_ERROR;
+
 	// Заполняем поля, которые подходят под параметры турбины:
     efi.timestamp                           = hrt_absolute_time();    // Обязательный системный таймштамп PX4
-	efi.flags;
+	efi.flags                               = errors;
 	efi.engine_speed_rpm                    = static_cast<float>(m_rpm);       // Обороты турбины (RPM)
 	efi.spark_dwell_time_ms                 = 0;
 	efi.atmospheric_pressure_kpa            = 0;
@@ -366,13 +442,13 @@ void ZKTurbine::sendTelemetry()
 	efi.cylinder_head_temperature           = 0;
 	efi.exhaust_gas_temperature             = m_exhTemperature;
 	efi.lambda_coefficient                  = 0;
-	efi.pid_idle_rpm_integral               = (!_is_armed) ? internal_combustion_engine_status_s::SUBSTATE_REST :
-                                              (_is_work) ? internal_combustion_engine_status_s::SUBSTATE_RUN :
-                                              internal_combustion_engine_status_s::SUBSTATE_IDLE;
+//	efi.pid_idle_rpm_integral
 	efi.state                               = (m_error != ErrorCode::NoError) ? internal_combustion_engine_status_s::STATE_FAULT :
                                               (m_state == EngineStatusCode::Stop) ? internal_combustion_engine_status_s::STATE_STOPPED :
                                               internal_combustion_engine_status_s::STATE_RUNNING;
-	efi.substate;
+	efi.substate                            = (!_is_armed) ? internal_combustion_engine_status_s::SUBSTATE_REST :
+                                              (_is_work) ? internal_combustion_engine_status_s::SUBSTATE_RUN :
+                                              internal_combustion_engine_status_s::SUBSTATE_IDLE;
 	efi.engine_load_percent                 = (m_maxRPM == 0) ? 0 : static_cast<uint8_t>(m_rpm * 100 / m_maxRPM);
 	efi.throttle_position_percent           = m_setThrottle / 10;
 	efi.ecu_index                           = 0;
