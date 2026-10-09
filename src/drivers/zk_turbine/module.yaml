@@ -4,3 +4,15 @@ serial_config:
       port_config_param:
           name: SENS_ZK_CFG
           group: Sensors
+
+parameters:
+    - group: Sensors
+      definitions:
+        SENS_ZK_OUT_CH:
+            description:
+                  short: ZK Turbine monitor output channel
+                  long: Selects which actuator output channel (1-16) the driver monitors for controlling the turbine. 0 means disabled.
+            type: int32
+            default: 0
+            min: 0
+            max: 16
