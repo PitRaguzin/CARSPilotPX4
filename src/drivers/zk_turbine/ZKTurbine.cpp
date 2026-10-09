@@ -13,8 +13,7 @@
 // Инициализация дескриптора модуля. Связываем функции с дескриптором. Использует constexpr конструктор: Descriptor(task_spawn, custom_command, print_usage)
 ModuleBase::Descriptor ZKTurbine::desc{task_spawn, custom_command, print_usage};
 
-ZKTurbine::ZKTurbine(const char *port_name) //:
-//    ScheduledWorkItem(MODULE_NAME, px4::wq_configurations::hp_default)
+ZKTurbine::ZKTurbine(const char *port_name) : ModuleParams(nullptr)
 {
     PX4_INFO("Constructor with port name: %s", port_name);
     strncpy(_port, port_name, sizeof(_port));
@@ -22,7 +21,6 @@ ZKTurbine::ZKTurbine(const char *port_name) //:
 
 ZKTurbine::~ZKTurbine()
 {
-//    ScheduleClear();
     closePort();
 }
 
@@ -47,41 +45,60 @@ int ZKTurbine::task_main()
 
     // Основной цикл программы
     while (!should_exit()) {
-        // 1. Проверка обновления значения уровня подачи газа
+        // 1. Проверка обновления параметров по подпискам
+        // 1.1. Обновление параметров турбины пользователем из-вне
+        if (_parameter_update_sub.updated()) {
+            parameter_update_s param_update;
+            _parameter_update_sub.copy(&param_update);
+            updateParams(); // Обновляет _param_sens_zk_out_ch
+        }
+        int32_t user_channel = _param_sens_zk_out_ch.get(); // Получаем выбранный пользователем канал (например, 1..16)
+        if (user_channel != _last_out_channel_num)
+            _last_out_channel_num = (user_channel >= 0 && user_channel <= 16) ? user_channel - 1 : -1;
+
+        // 1.2. Значение arm
+        if (_vehicle_status_sub.updated()) {
+            vehicle_status_s status;
+            _vehicle_status_sub.copy(&status);
+            bool current_arm = status.arming_state == vehicle_status_s::ARMING_STATE_ARMED;
+            if (current_arm != _is_armed)
+                _is_armed = current_arm;
+        }
+
+        // 1.3. Значение на выходе включения рабочего режима турбины
+        if (_actuator_outputs_sub.updated() && _last_out_channel_num != -1) {
+            actuator_outputs_s outputs;
+            _actuator_outputs_sub.copy(&outputs);
+            float raw_value = outputs.output[_last_out_channel_num]; // Получаем значение с нужного нам канала вывода
+
+            // Универсальная логика определения состояния: если значение близко к 1 (чистый GPIO High) ИЛИ больше 1500 (ШИМ max)
+            bool turbine_should_on = (raw_value > 0.5f && raw_value < 2.0f) || raw_value > 1500.0f;
+            if (turbine_should_on != _is_work)
+                _is_work = turbine_should_on;
+
+            PX4_INFO("Activating: %s", turbine_should_on ? "ON" : "OFF");
+        }
+
+        // 1.4. Проверка обновления значения уровня подачи газа
         if (_thrust_sp_sub.updated()) {
             vehicle_thrust_setpoint_s thrust_sp;
             if (_thrust_sp_sub.copy(&thrust_sp))
                 m_setThrottle = thrust_sp.xyz[0] * 1000; // Индекс 3 отвечает за газ (THROTTLE) во всех стандартных микшерах, значение от 0.0 до 1.0
         }
 
-        // 2. Работа с турбиной
+        // 2. Расчёт статуса работы турбины для отправки
+        SW_1 new_turbine_status = (!_is_armed) ? SW_1::ControlEngineIntoStopState : (_is_work) ? SW_1::ControlEngineIntoRunningState : SW_1::ControlEngineIntoStandbyMode;
+        if (new_turbine_status != m_mode) {
+            m_mode = new_turbine_status;
+            PX4_INFO("Set mode: %s", m_mode == SW_1::ControlEngineIntoStopState ? "STOP" : m_mode == SW_1::ControlEngineIntoRunningState ? "RUN" : "STANDBY");
+        }
+
+        // 3. Работа с турбиной
         if (_fd >= 0) {
-            // 2.1. Отправка данных
+            // 3.1. Отправка данных
             uint8_t wr_bytes[4];
             wr_bytes[0] = SendHeaderByte;
             SendPacketData wr_packet;
-
-            // Уточнение значения отправляемого режима
-            m_mode = (m_setThrottle == 0) ? SW_1::ControlEngineIntoStandbyMode : SW_1::ControlEngineIntoRunningState;
-//            float outputnorm = SRV_Channels::get_output_norm(SRV_Channel::Aux_servo_function_t::k_rcin8);
-//            switch (m_mode)
-//            {
-//            case SW_1::ControlEngineIntoStopState:
-//            case SW_1::ControlEngineIntoStandbyMode:
-//            {
-//                if (outputnorm > 0)
-//                    m_mode = SW_1::ControlEngineIntoRunningState;
-//                break;
-//            }
-//            case SW_1::ControlEngineIntoRunningState:
-//            {
-//                if (outputnorm < 0)
-//                    m_mode = SW_1::ControlEngineIntoStandbyMode;
-//                break;
-//            }
-//            case SW_1::UartDoesNotControlEngine:
-//                break;
-//            }
 
             wr_packet.Command.ID = (uint16_t)SendCommand::ID_1;
             wr_packet.ID1Data.SW = (uint16_t)m_mode;
@@ -101,7 +118,7 @@ int ZKTurbine::task_main()
                 }
             }
 
-            // 2.2. Чтение данных
+            // 3.2. Чтение данных
             struct pollfd fds[1];
             fds[0].fd = _fd;
             fds[0].events = POLLIN;
@@ -223,116 +240,6 @@ bool ZKTurbine::init()
 
     return true;
 }
-
-//void ZKTurbine::Run()
-//{
-//    static int counter = 3;
-//    if (counter-- > 0)
-//        PX4_INFO("Periodic function start");
-//
-//    if (should_exit()) {
-//        ScheduleClear();
-////        closePort();
-////        ModuleBase::exit_and_cleanup(desc);
-//        return;
-//    }
-//
-//    // Отправка пакета
-//    uint8_t wr_bytes[4];
-//    wr_bytes[0] = SendHeaderByte;
-//    SendPacketData wr_packet;
-//
-////    // Уточнение значения отправляемого режима
-////    float outputnorm = SRV_Channels::get_output_norm(SRV_Channel::Aux_servo_function_t::k_rcin8);
-////    switch (m_mode)
-////    {
-////    case SW_1::ControlEngineIntoStopState:
-////    case SW_1::ControlEngineIntoStandbyMode:
-////    {
-////        if (outputnorm > 0)
-////            m_mode = SW_1::ControlEngineIntoRunningState;
-////        break;
-////    }
-////    case SW_1::ControlEngineIntoRunningState:
-////    {
-////        if (outputnorm < 0)
-////            m_mode = SW_1::ControlEngineIntoStandbyMode;
-////        break;
-////    }
-////    case SW_1::UartDoesNotControlEngine:
-////        break;
-////    }
-//
-//    // Отправка данных
-//    wr_packet.Command.ID = (uint16_t)SendCommand::ID_1;
-//    wr_packet.ID1Data.SW = (uint16_t)SW_1::UartDoesNotControlEngine;//m_mode;
-//    wr_packet.ID1Data.Throttle = 0;//(m_mode == SW_1::ControlEngineIntoRunningState) ? static_cast<uint16_t>(SRV_Channels::get_output_scaled(SRV_Channel::k_throttle) * 10) : 0;
-//    m_setThrottle = wr_packet.ID1Data.Throttle;
-//    wr_bytes[1] = wr_packet.bytes[1];
-//    wr_bytes[2] = wr_packet.bytes[0];
-//    wr_bytes[3] = crc8(&wr_bytes[1], 2, 0);
-//
-//    ssize_t wr_res = write(_fd, wr_bytes, 4);
-//    if (wr_res == -1) {
-//        static uint64_t last_err_t = 0;
-//        if (hrt_absolute_time() - last_err_t > 1000000) {
-//            PX4_ERR("Failed to write UART port %s: errno=%d", _port, errno);
-//            last_err_t = hrt_absolute_time();
-//        }
-//    }
-//
-//    // Чтение данных из UART
-//    int rd_res = read(_fd, &_buffer[_offset], sizeof(_buffer) - sizeof(_buffer[0]) * _offset);
-//    if (rd_res > 0)
-//    {
-//        _offset+= rd_res;
-//        int local_offset = 0;
-//        while (_offset > local_offset && _offset - local_offset >= 7) {
-//
-//            while (local_offset < _offset && _buffer[local_offset] != ReadHeader)
-//                local_offset++;
-//
-//            if (_offset - local_offset >= 7)
-//            {
-//                ReceivePacket rd_packet;
-//                memcpy(&rd_packet.bytes, &_buffer[local_offset], sizeof(rd_packet.bytes));
-//                if (rd_packet.data.Command < (uint8_t)ReadCommand::ID_1 ||  // Если идентификатор команды меньше известного нам
-//                    rd_packet.data.Command > (uint8_t)ReadCommand::ID_9 ||  // ... или больше известного нам
-//                    !checkPacket(rd_packet))                                // ... или пакет не прошёл проверку целостности
-//                {                                                           // .., значит мы за заголовок приняли часть предыдущего пакета
-//                    local_offset++;
-//                    continue;
-//                }
-//
-//                parseData(rd_packet);
-//                if (rd_packet.data.Command == (uint8_t)ReadCommand::ID_9)
-//                    sendTelemetry();
-//
-//                local_offset+= sizeof(rd_packet.bytes);
-//            }
-//        }
-//
-//        if (local_offset > 0)
-//        {
-//            int remain = _offset - local_offset;
-//            if (remain > 0)
-//                memmove(_buffer, &_buffer[local_offset], remain);
-//            _offset = remain;
-//        }
-//    }
-//    else if (rd_res < 0) {
-//        if (errno != EAGAIN) {
-//            static uint64_t last_r_err = 0;
-//            if (hrt_absolute_time() - last_r_err > 1000000) {
-//                PX4_ERR("Failed to read port %s: errno=%d", _port, errno);
-//                last_r_err = hrt_absolute_time();
-//            }
-//        }
-//    }
-//
-////    ScheduleDelayed(10000);
-//    ScheduleOnInterval(20000);
-//}
 
 bool ZKTurbine::checkPacket(const ReceivePacket &p) const
 {
@@ -537,13 +444,6 @@ int ZKTurbine::task_spawn(int argc, char *argv[])
         return PX4_ERROR;
     }
 
-//    if (!instance->init()) {
-//        PX4_ERR("Init error");
-//        desc.object.store(nullptr);
-//        delete instance;
-//        return PX4_ERROR;
-//    }
-
     desc.object.store(instance);
 
     int task_id = px4_task_spawn_cmd(
@@ -564,8 +464,6 @@ int ZKTurbine::task_spawn(int argc, char *argv[])
 
     desc.task_id = task_id;
 
-//    instance->ScheduleNow();
-//    ScheduleOnInterval(20000); // Запуск периодического выполнения (например, каждые 20 мс / 50 Гц)
     return PX4_OK;
 }
 

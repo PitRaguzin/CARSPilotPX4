@@ -10,10 +10,13 @@
 #include <uORB/Subscription.hpp>
 #include <uORB/topics/internal_combustion_engine_status.h>
 #include <uORB/topics/vehicle_thrust_setpoint.h>
+#include <uORB/topics/actuator_outputs.h>
+#include <uORB/topics/parameter_update.h>
+#include <uORB/topics/vehicle_status.h>
 
 #define PACKED __attribute__((__packed__))
 
-class ZKTurbine : public ModuleBase//, public px4::ScheduledWorkItem
+class ZKTurbine : public ModuleBase, public ModuleParams
 {
 public:
     static ModuleBase::Descriptor desc;  ///< Статический дескриптор модуля, который требует архитектура PX4
@@ -27,7 +30,6 @@ public:
 
     bool init();
 
-//    void Run() override; // Основной цикл обработки данных
     static int task_main_trampoline(int argc, char *argv[]);
     int task_main();
 
@@ -337,6 +339,9 @@ private:
     };
 /////////////////////////////// ЧТЕНИЕ ДАННЫХ (конец) ////////////////////////////////
 
+    /// @brief обработчик изменения состояния параметров управления включением работы турбины
+    void updateControlOutput();
+
     /// @brief Проверка целостности принятого пакета
     /// @param p Принятый пакет
     /// @return Результат проверки целостности
@@ -359,44 +364,52 @@ private:
     /// @brief Закрытие последовательного порта
     void closePort();
 
-    int32_t _turbine_port_val{0};       ///< Переменная для хранения значения порта, прочитанного из параметров
     char _port[32];                     ///< Имя порта UART в системе
     int _fd{-1};                        ///< Дескриптор порта UART
     int _offset = 0;                    ///< Смещение для чтения данных в буфер
     uint8_t _buffer[64];                ///< Буфер для чтения данных из порта UART
+    int32_t _turbine_port_val{0};       ///< Переменная для хранения значения порта, прочитанного из параметров
+    int32_t _last_out_channel_num{-1};  ///< Тип интерфейса для управления включением работы турбины
+    bool _is_work{false};               ///< Статус включения рабочего режима
+    bool _is_armed{false};              ///< Статус arm
 
     uORB::Publication<internal_combustion_engine_status_s> _efi_status_pub{ORB_ID(internal_combustion_engine_status)};
-    uORB::Subscription _thrust_sp_sub{ORB_ID(vehicle_thrust_setpoint)};
+    uORB::Subscription _thrust_sp_sub{ORB_ID(vehicle_thrust_setpoint)}; ///< Получение значения уровня газа
+    uORB::Subscription _actuator_outputs_sub{ORB_ID(actuator_outputs)}; ///< Получение значений выходов GPIO и ШИМ
+    uORB::Subscription _vehicle_status_sub{ORB_ID(vehicle_status)};     ///< Получение значения arm\disarm
+    uORB::Subscription _parameter_update_sub{ORB_ID(parameter_update)}; ///< Получение статуса обновления параметров
+    DEFINE_PARAMETERS(
+        (ParamInt<px4::params::SENS_ZK_OUT_CH>) _param_sens_zk_out_ch
+    )
 
     SW_1 m_mode = SW_1::ControlEngineIntoStopState; ///< Значение режима, отправляемое в ECU
-
-    uint16_t m_setThrottle;         ///< Задаваемое значение газа (процента используемой мощности) (промилле)
-    uint32_t m_rpm;                 ///< Значение оборотов двигателя в минуту
-    ErrorCode m_error;              ///< Код ошибки
-    EngineStatusCode m_state;       ///< Статус работы двигателя
-    HostStatus m_hostStatus;        ///< Статус управляющего (компьютера\полётного контроллера)
-    int16_t m_exhTemperature;       ///< Температура выхлопных газов (*С)
-    float m_radioVoltage;           ///< Управляющее напряжение (В)
-    float m_powerVoltage;           ///< Напряжение питания (В)
-    float m_pumpVoltage;            ///< Напряжение насоса (В)
-    uint8_t m_throttle;             ///< Процент используемой мощности (%)
-    uint32_t m_pressure;            ///< Давление (Па)
-    float m_current;                ///< Ток (А)
-    float m_thrust;                 ///< Тяга (кг)
-    float m_ignPumpVoltage;         ///< Ignition pump voltage (В)
-    uint8_t m_acceleration;         ///< Ускорение
-    uint8_t m_deceleration;         ///< Замедление
-    uint32_t m_maxRPM;              ///< Максимальное значение оборотов двигателя в минуту
-    float m_maxPumpVoltage;         ///< Максимальное значение напряжения насоса (В)
-    uint8_t m_protocolVersion;      ///< Версия протокола
-    DataUpdateRate m_updateRate;    ///< Значение частоты обновления данных
-    float m_flowRate;               ///< Текущий расход топлива (л/мин)
-    float m_flowTotal;              ///< Общий расход (л)
-    uint32_t m_idleRPM;             ///< Холостые обороты двигателя
-    ESR m_esr;                      ///< Необходимость отправлять данные об атмосферном давлении
-    SCL m_scl;                      ///< Speed closed loop state
-    uint32_t m_startupTime;         ///< Время работы (мс)
-    int16_t m_ecuTemperature;       ///< Температура ECU (*С)
+    uint16_t m_setThrottle;                         ///< Задаваемое значение газа (процента используемой мощности) (промилле)
+    uint32_t m_rpm;                                 ///< Значение оборотов двигателя в минуту
+    ErrorCode m_error;                              ///< Код ошибки
+    EngineStatusCode m_state;                       ///< Статус работы двигателя
+    HostStatus m_hostStatus;                        ///< Статус управляющего (компьютера\полётного контроллера)
+    int16_t m_exhTemperature;                       ///< Температура выхлопных газов (*С)
+    float m_radioVoltage;                           ///< Управляющее напряжение (В)
+    float m_powerVoltage;                           ///< Напряжение питания (В)
+    float m_pumpVoltage;                            ///< Напряжение насоса (В)
+    uint8_t m_throttle;                             ///< Процент используемой мощности (%)
+    uint32_t m_pressure;                            ///< Давление (Па)
+    float m_current;                                ///< Ток (А)
+    float m_thrust;                                 ///< Тяга (кг)
+    float m_ignPumpVoltage;                         ///< Ignition pump voltage (В)
+    uint8_t m_acceleration;                         ///< Ускорение
+    uint8_t m_deceleration;                         ///< Замедление
+    uint32_t m_maxRPM;                              ///< Максимальное значение оборотов двигателя в минуту
+    float m_maxPumpVoltage;                         ///< Максимальное значение напряжения насоса (В)
+    uint8_t m_protocolVersion;                      ///< Версия протокола
+    DataUpdateRate m_updateRate;                    ///< Значение частоты обновления данных
+    float m_flowRate;                               ///< Текущий расход топлива (л/мин)
+    float m_flowTotal;                              ///< Общий расход (л)
+    uint32_t m_idleRPM;                             ///< Холостые обороты двигателя
+    ESR m_esr;                                      ///< Необходимость отправлять данные об атмосферном давлении
+    SCL m_scl;                                      ///< Speed closed loop state
+    uint32_t m_startupTime;                         ///< Время работы (мс)
+    int16_t m_ecuTemperature;                       ///< Температура ECU (*С)
 
     int m_msgcounter = 0;
 };
