@@ -48,22 +48,56 @@ int ZKTurbine::task_main()
         if (_parameter_update_sub.updated()) {
             parameter_update_s param_update;
             _parameter_update_sub.copy(&param_update);
-            updateParams(); // Обновляет _param_sens_zk_out_ch
-        }
-        int32_t user_channel = _param_sens_zk_out_ch.get(); // Получаем выбранный пользователем канал (например, 1..16)
-        if (user_channel != _last_out_channel_num)
-            _last_out_channel_num = (user_channel >= 0 && user_channel <= 16) ? user_channel - 1 : -1;
+            updateParams(); // Обновляет параметры
 
-        // 1.2. Значение arm
+            int32_t user_channel = _param_sens_zk_out_ch.get(); // Получаем выбранный пользователем канал (например, 1..16)
+            if (user_channel != _last_out_channel_num)
+                _last_out_channel_num = (user_channel >= 0 && user_channel <= 16) ? user_channel - 1 : -1;
+
+            _takeoff_idle_timeout = _param_sens_zk_idle_t.get() * 1000000;
+            _takeoff_idle_speed = _param_sens_zk_idle_sp.get();
+            _takeoff_max_rpm_timeout = _param_sens_zk_max_t.get() * 1000000;
+            _takeoff_max_rpm_speed = _param_sens_zk_max_sp.get();
+            _takeoff_z_overdrive = _param_sens_zk_overdrv.get() * g;
+            _takeoff_z_overdrive_timeout = _param_sens_zk_ovdr_to.get() * 1000000;
+            _takeoff_z_overdrive_time = _param_sens_zk_ovdrv_t.get() * 1000000;
+            _takeoff_pitch_angle_start = _param_sens_zk_pitch_s.get();
+            _takeoff_pitch_angle_finish = _param_sens_zk_pitch_f.get();
+        }
+
+//        // 1.2. Получение номера выхода для управления рулём тангажа
+//        if (_actuator_status_sub.updated())
+//        {
+//            actuator_output_status_s output_status;
+//            if (_actuator_status_sub.copy(&output_status))
+//            {
+//                for (int i = 0;i < actuator_output_status_s::NUM_ACTUATOR_OUTPUTS;i++)
+//                {
+//                    if (output_status.function[i] == actuator_output_status_s::FUNCTION_PERIPHERIAL_VIA_ACTUATOR_SET1)
+//                        _pitch_channel = i;
+//                }
+//            }
+//        }
+
+        // 1.3. Значение arm и режима взлёта
         if (_vehicle_status_sub.updated()) {
             vehicle_status_s status;
             _vehicle_status_sub.copy(&status);
             bool current_arm = status.arming_state == vehicle_status_s::ARMING_STATE_ARMED;
             if (current_arm != _is_armed)
                 _is_armed = current_arm;
+
+            bool current_takeoff = status.nav_state == vehicle_status_s::NAVIGATION_STATE_AUTO_TAKEOFF;
+            if (_is_takeoff != current_takeoff)
+            {
+                _is_takeoff = current_takeoff;
+                _current_takeoff_state = _is_takeoff ? TakeoffState::SetIdle : TakeoffState::NoTakeoff;
+                if (_is_takeoff)
+                    _takeoff_state_timeout = hrt_absolute_time() + _takeoff_idle_timeout;
+            }
         }
 
-        // 1.3. Значение на выходе включения рабочего режима турбины
+        // 1.4. Значение на выходе включения рабочего режима турбины
         if (_actuator_outputs_sub.updated() && _last_out_channel_num != -1) {
             actuator_outputs_s outputs;
             _actuator_outputs_sub.copy(&outputs);
@@ -75,20 +109,125 @@ int ZKTurbine::task_main()
                 _is_work = turbine_should_on;
 
             PX4_INFO("Activating: %s", turbine_should_on ? "ON" : "OFF");
+
+            _current_pitch_angle = outputs.output[_pitch_channel] * 180;
         }
 
-        // 1.4. Проверка обновления значения уровня подачи газа
+        // 1.5. Проверка обновления значения уровня подачи газа
         if (_thrust_sp_sub.updated()) {
             vehicle_thrust_setpoint_s thrust_sp;
             if (_thrust_sp_sub.copy(&thrust_sp))
                 m_setThrottle = thrust_sp.xyz[0] * 1000; // Индекс 3 отвечает за газ (THROTTLE) во всех стандартных микшерах, значение от 0.0 до 1.0
         }
 
-        // 2. Расчёт статуса работы турбины для отправки
+        // 1.6. Проверка обновления данных об ускорениях по осям
+        if (_sensor_combined_sub.updated())
+        {
+            sensor_combined_s imu;
+            if (_sensor_combined_sub.copy(&imu))
+                _current_z_overdrive = imu.accelerometer_m_s2[2];
+        }
+
+        // 2. Расчёт данных для отправки в турбину
+        // 2.1. Статус работы турбины для отправки
         SW_1 new_turbine_status = (!_is_armed) ? SW_1::ControlEngineIntoStopState : (_is_work) ? SW_1::ControlEngineIntoRunningState : SW_1::ControlEngineIntoStandbyMode;
         if (new_turbine_status != m_mode) {
             m_mode = new_turbine_status;
             PX4_INFO("Set mode: %s", m_mode == SW_1::ControlEngineIntoStopState ? "STOP" : m_mode == SW_1::ControlEngineIntoRunningState ? "RUN" : "STANDBY");
+        }
+
+        // 2.2. Управление взлётом (здесь может заменяться значение подаваемого газа)
+        if (_is_takeoff && m_mode == SW_1::ControlEngineIntoRunningState)
+        {
+            // Этап 1. Выход на холостые обороты
+            if (_current_takeoff_state == TakeoffState::SetIdle)
+            {
+                m_setThrottle = 0;
+                if (m_rpm <= _takeoff_idle_speed)
+                {
+                    _current_takeoff_state = TakeoffState::SetMaxSpeed;
+                    _takeoff_state_timeout = hrt_absolute_time() + _takeoff_max_rpm_timeout;
+                }
+            }
+
+            // Этап 2. Выход на максимальный газ
+            if (_current_takeoff_state == TakeoffState::SetMaxSpeed)
+            {
+                m_setThrottle = 1000;
+                if (m_rpm <= _takeoff_max_rpm_speed)
+                {
+                    _current_takeoff_state = TakeoffState::SetKillswitch;
+                    _takeoff_state_timeout = hrt_absolute_time() + _takeoff_z_overdrive_timeout;
+                    _is_overdrive = false;
+                }
+            }
+
+            // Этап 3. Поджиг и выход в перегрузку
+            static uint64_t overdrive_time = 0;
+            if (_current_takeoff_state == TakeoffState::SetKillswitch)
+            {
+                // ТУДУ: нужно отправить команду на поджиг
+                if (_current_z_overdrive > _takeoff_z_overdrive)
+                {
+                    if (overdrive_time == 0)
+                        overdrive_time = hrt_absolute_time() + _takeoff_z_overdrive_time;
+
+                    _is_overdrive = hrt_absolute_time() > overdrive_time;
+
+                    if (_is_overdrive)
+                    {
+                        _current_takeoff_state = TakeoffState::Pitching;
+                        _takeoff_state_timeout = UINT64_MAX;
+                        actuator_servos_s msg{};
+                        msg.control[_pitch_channel] = (_takeoff_pitch_angle_start / 180.0f);
+                        _actuator_servos_pub.publish(msg);
+                    }
+                }
+                else
+                    overdrive_time = 0;
+            }
+
+            // Этап 4. Руление до завершения взлёта
+            if (_current_takeoff_state == TakeoffState::Pitching)
+            {
+                if (_current_pitch_angle > _takeoff_pitch_angle_finish)
+                {
+                    vehicle_command_s cmd{};
+                    cmd.timestamp = hrt_absolute_time();
+                    cmd.command = vehicle_command_s::VEHICLE_CMD_DO_SET_MODE; // MAV_CMD_DO_SET_MODE
+                    cmd.param1 = 1.0f; // MAV_MODE_FLAG_CUSTOM_MODE_ENABLED - базовый режим (для кастомных режимов PX4 всегда 1.0)
+                    cmd.param2 = 3.0f; // PX4_CUSTOM_MAIN_MODE_AUTO - задаем Main Mode
+                    cmd.param3 = 3.0f; // PX4_CUSTOM_SUB_MODE_AUTO_LOITER - задаем Sub Mode (переключение в режим HOLD (Loiter))
+                    cmd.target_system = 1;
+                    cmd.target_component = 1;
+                    cmd.source_system = 1;
+                    cmd.source_component = 1; // Можно указать компонент вашего драйвера
+                    cmd.from_external = false; // Важно: команда генерируется внутри прошивки
+                    _vehicle_command_pub.publish(cmd);
+                }
+            }
+
+            if (hrt_absolute_time() > _takeoff_state_timeout)
+            {
+                // Выключение входа для is working
+                actuator_servos_s msg{};
+                msg.control[_last_out_channel_num] = 0;
+                _actuator_servos_pub.publish(msg);
+
+                // ТУДУ: (Это правильно?????) Отправка в режим Hold (Loiter)
+                vehicle_command_s cmd{};
+                cmd.timestamp = hrt_absolute_time();
+                cmd.command = vehicle_command_s::VEHICLE_CMD_DO_SET_MODE; // MAV_CMD_DO_SET_MODE
+                cmd.param1 = 1.0f; // MAV_MODE_FLAG_CUSTOM_MODE_ENABLED - базовый режим (для кастомных режимов PX4 всегда 1.0)
+                cmd.param2 = 3.0f; // PX4_CUSTOM_MAIN_MODE_AUTO - задаем Main Mode
+                cmd.param3 = 3.0f; // PX4_CUSTOM_SUB_MODE_AUTO_LOITER - задаем Sub Mode (переключение в режим HOLD (Loiter))
+                cmd.target_system = 1;
+                cmd.target_component = 1;
+                cmd.source_system = 1;
+                cmd.source_component = 1; // Можно указать компонент вашего драйвера
+                cmd.from_external = false; // Важно: команда генерируется внутри прошивки
+                _vehicle_command_pub.publish(cmd);
+            }
         }
 
         // 3. Работа с турбиной

@@ -54,8 +54,8 @@ VTX::VTX(const char *device) :
 	_perf_set_pit_mode(perf_alloc(PC_COUNT, MODULE_NAME": errors set pit mode"))
 {
 	if (device) {
-		strlcpy(_serial_path, device, sizeof(_serial_path));
-//		snprintf(_serial_path, sizeof(_serial_path), "%s", device);
+//		strlcpy(_serial_path, device, sizeof(_serial_path));
+		snprintf(_serial_path, sizeof(_serial_path), "%s", device);
 	}
 }
 

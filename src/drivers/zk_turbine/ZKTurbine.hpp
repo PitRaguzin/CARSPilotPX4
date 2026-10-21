@@ -11,8 +11,12 @@
 #include <uORB/topics/internal_combustion_engine_status.h>
 #include <uORB/topics/vehicle_thrust_setpoint.h>
 #include <uORB/topics/actuator_outputs.h>
+//#include <uORB/topics/actuator_output_status.h>
+#include <uORB/topics/actuator_servos.h>
 #include <uORB/topics/parameter_update.h>
 #include <uORB/topics/vehicle_status.h>
+#include <uORB/topics/vehicle_command.h>
+#include <uORB/topics/sensor_combined.h>
 
 #define PACKED __attribute__((__packed__))
 
@@ -364,22 +368,60 @@ private:
     /// @brief Закрытие последовательного порта
     void closePort();
 
+    const float g = 9.81;               ///< Ускорение свободного падения, м/с^2
+
     char _port[32];                     ///< Имя порта UART в системе
     int _fd{-1};                        ///< Дескриптор порта UART
     int _offset = 0;                    ///< Смещение для чтения данных в буфер
     uint8_t _buffer[64];                ///< Буфер для чтения данных из порта UART
     int32_t _turbine_port_val{0};       ///< Переменная для хранения значения порта, прочитанного из параметров
     int32_t _last_out_channel_num{-1};  ///< Тип интерфейса для управления включением работы турбины
+    int _pitch_channel{2};              ///< Канал управления рулём тангажа
     bool _is_work{false};               ///< Статус включения рабочего режима
     bool _is_armed{false};              ///< Статус arm
+    bool _is_takeoff{false};            ///< Активность взлёта
+    uint64_t _takeoff_state_timeout;    ///< Метка времени начала текущего этапа взлёта
+    enum TakeoffState
+    {
+        NoTakeoff = 0,
+        SetIdle = 1,
+        SetMaxSpeed = 2,
+        SetKillswitch = 3,
+        Pitching = 4
+    } _current_takeoff_state{TakeoffState::NoTakeoff};  ///< Текущий этап взлёта
+    uint64_t _takeoff_idle_timeout;         ///< Время установки обротов турбины в значение холостого хода, мкс
+    uint64_t _takeoff_idle_speed;           ///< Значение RPM для обротов холостого хода
+    uint64_t _takeoff_max_rpm_timeout;      ///< Время установки обротов турбины в значение максимального газа, мкс
+    uint64_t _takeoff_max_rpm_speed;        ///< Значение RPM для обротов максимального газа
+    float _takeoff_z_overdrive;             ///< Перегрузка по оси Z, м/с^2
+    uint64_t _takeoff_z_overdrive_timeout;  ///< Время ожидания перегрузки по оси Z, с
+    uint64_t _takeoff_z_overdrive_time;     ///< Время перегрузки по оси Z, с
+    float _takeoff_pitch_angle_start;       ///< Угол тангажа на начало взлёта, град
+    float _takeoff_pitch_angle_finish;      ///< Угол тангажа на окончание взлёта, град
+    bool _is_overdrive{false};              ///< Флаг наличия указанной перегрузки
+    float _current_z_overdrive;             ///< Текущее ускорение по оси Z, м/с^2
+    float _current_pitch_angle;             ///< Текуший угол тангажа, град
 
     uORB::Publication<internal_combustion_engine_status_s> _efi_status_pub{ORB_ID(internal_combustion_engine_status)};
-    uORB::Subscription _thrust_sp_sub{ORB_ID(vehicle_thrust_setpoint)}; ///< Получение значения уровня газа
-    uORB::Subscription _actuator_outputs_sub{ORB_ID(actuator_outputs)}; ///< Получение значений выходов GPIO и ШИМ
-    uORB::Subscription _vehicle_status_sub{ORB_ID(vehicle_status)};     ///< Получение значения arm\disarm
-    uORB::Subscription _parameter_update_sub{ORB_ID(parameter_update)}; ///< Получение статуса обновления параметров
+    uORB::Publication<actuator_servos_s> _actuator_servos_pub{ORB_ID(actuator_servos)};
+    uORB::Publication<vehicle_command_s> _vehicle_command_pub{ORB_ID(vehicle_command)};
+    uORB::Subscription _thrust_sp_sub{ORB_ID(vehicle_thrust_setpoint)};         ///< Получение значения уровня газа
+    uORB::Subscription _actuator_outputs_sub{ORB_ID(actuator_outputs)};         ///< Получение значений выходов GPIO и ШИМ
+//    uORB::Subscription _actuator_status_sub{ORB_ID(actuator_output_status)};    ///< Получение карты выходов
+    uORB::Subscription _vehicle_status_sub{ORB_ID(vehicle_status)};             ///< Получение значения arm\disarm
+    uORB::Subscription _parameter_update_sub{ORB_ID(parameter_update)};         ///< Получение статуса обновления параметров
+    uORB::Subscription _sensor_combined_sub{ORB_ID(sensor_combined)};           ///< Получение ускорения (перегрузки) по осям
     DEFINE_PARAMETERS(
-        (ParamInt<px4::params::SENS_ZK_OUT_CH>) _param_sens_zk_out_ch
+        (ParamInt<px4::params::SENS_ZK_OUT_CH>) _param_sens_zk_out_ch,
+        (ParamInt<px4::params::SENS_ZK_IDLE_T>) _param_sens_zk_idle_t,
+        (ParamInt<px4::params::SENS_ZK_IDLE_SP>) _param_sens_zk_idle_sp,
+        (ParamInt<px4::params::SENS_ZK_MAX_T>) _param_sens_zk_max_t,
+        (ParamInt<px4::params::SENS_ZK_MAX_SP>) _param_sens_zk_max_sp,
+        (ParamFloat<px4::params::SENS_ZK_OVERDRV>) _param_sens_zk_overdrv,
+        (ParamFloat<px4::params::SENS_ZK_OVDR_TO>) _param_sens_zk_ovdr_to,
+        (ParamFloat<px4::params::SENS_ZK_OVDRV_T>) _param_sens_zk_ovdrv_t,
+        (ParamFloat<px4::params::SENS_ZK_PITCH_S>) _param_sens_zk_pitch_s,
+        (ParamFloat<px4::params::SENS_ZK_PITCH_F>) _param_sens_zk_pitch_f
     )
 
     SW_1 m_mode = SW_1::ControlEngineIntoStopState; ///< Значение режима, отправляемое в ECU

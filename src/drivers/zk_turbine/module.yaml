@@ -10,9 +10,90 @@ parameters:
       definitions:
         SENS_ZK_OUT_CH:
             description:
-                  short: ZK Turbine monitor output channel
-                  long: Selects which actuator output channel (1-16) the driver monitors for controlling the turbine. 0 means disabled.
+                  short: Канал для включения рабочего режима турбины ZK
+                  long: Указать канал (1..16) для включения рабочего режима турбины ZK. 0 - канал не назначен.
             type: int32
             default: 0
             min: 0
             max: 16
+
+        SENS_ZK_IDLE_T:
+            description:
+                  short: Время достижения оборотов холостого хода
+                  long: Установка максимального времени, достаточного для сброса оборотов турбины до холостого хода, с
+            type: int32
+            default: 120
+            min: 0
+            max: 3600
+
+        SENS_ZK_IDLE_SP:
+            description:
+                  short: Обороты холостого хода
+                  long: Установка значения оборотов холостого хода, об/мин
+            type: int32
+            default: 50000
+            min: 0
+            max: 200000
+
+        SENS_ZK_MAX_T:
+            description:
+                  short: Время достижения максимальных оборотов
+                  long: Установка максимального времени, достаточного для набора оборотов турбины до максимального значения, с
+            type: int32
+            default: 30
+            min: 0
+            max: 3600
+
+        SENS_ZK_MAX_SP:
+            description:
+                  short: Маскимальные обороты турбины
+                  long: Установка значения максимальных оборотов турбины, об/мин
+            type: int32
+            default: 145000
+            min: 0
+            max: 2000000
+
+        SENS_ZK_OVERDRV:
+            description:
+                  short: Перегрузка по оси Z на взлёте
+                  long: Значение перегрузки по оси Z при взлёте, g
+            type: float
+            default: 2.0
+            min: 0
+            max: 2000000
+
+        SENS_ZK_OVDR_TO:
+            description:
+                  short: Время ожидания перегрузки по оси Z на взлёте
+                  long: Значение времени, в течение которого ожидается указанная перегрузка по оси Z при взлёте, с
+            type: float
+            default: 10
+            min: 0
+            max: 2000000
+
+        SENS_ZK_OVDRV_T:
+            description:
+                  short: Время перегрузки по оси Z на взлёте
+                  long: Значение времени, в течение которого происходит указанная перегрузка по оси Z при взлёте, с
+            type: float
+            default: 0.05
+            min: 0
+            max: 2000000
+
+        SENS_ZK_PITCH_S:
+            description:
+                  short: Угол тангажа на начало взлёта
+                  long: Значение угла тангажа перед началом взлёта, град
+            type: float
+            default: 7
+            min: 0
+            max: 360
+
+        SENS_ZK_PITCH_F:
+            description:
+                  short: Угол тангажа на окончание взлёта
+                  long: Значение угла тангажа при окончании взлёта, град
+            type: float
+            default: 25
+            min: 0
+            max: 360

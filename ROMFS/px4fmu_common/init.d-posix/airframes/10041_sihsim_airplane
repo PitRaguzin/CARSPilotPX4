@@ -79,3 +79,5 @@ param set-default FW_YR_I 3
 param set-default FW_YR_D 0
 param set-default FW_YR_FF 0
 param set-default FW_YR_IMAX 1
+
+zk_turbine start -d /dev/ttyS0
