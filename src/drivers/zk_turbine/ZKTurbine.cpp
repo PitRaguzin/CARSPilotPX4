@@ -41,7 +41,7 @@ int ZKTurbine::task_main()
         return PX4_ERROR;
     }
 
-    // Основной цикл программы
+    // Основной цикл программы (ВАЖНО!!! Последовательность шагов обработки выверена: её изменение может повлиять на правильность работы)
     while (!should_exit()) {
         // 1. Проверка обновления параметров по подпискам
         // 1.1. Обновление параметров турбины пользователем из-вне
@@ -54,15 +54,19 @@ int ZKTurbine::task_main()
             if (user_channel != _last_out_channel_num)
                 _last_out_channel_num = (user_channel >= 0 && user_channel <= 16) ? user_channel - 1 : -1;
 
-            _takeoff_idle_timeout = _param_sens_zk_idle_t.get() * 1000000;
+            _takeoff_idle_timeout = _param_sens_zk_idle_to.get() * 1000000;
+            _takeoff_idle_time = _param_sens_zk_idle_t.get() * 1000000;
             _takeoff_idle_speed = _param_sens_zk_idle_sp.get();
-            _takeoff_max_rpm_timeout = _param_sens_zk_max_t.get() * 1000000;
+            _takeoff_max_rpm_timeout = _param_sens_zk_max_to.get() * 1000000;
             _takeoff_max_rpm_speed = _param_sens_zk_max_sp.get();
-            _takeoff_z_overdrive = _param_sens_zk_overdrv.get() * g;
-            _takeoff_z_overdrive_timeout = _param_sens_zk_ovdr_to.get() * 1000000;
-            _takeoff_z_overdrive_time = _param_sens_zk_ovdrv_t.get() * 1000000;
+            _takeoff_x_overdrive = _param_sens_zk_overdrv.get() * g;
+            _takeoff_x_overdrive_timeout = _param_sens_zk_ovdr_to.get() * 1000000;
+            _takeoff_x_overdrive_time = _param_sens_zk_ovdrv_t.get() * 1000000;
             _takeoff_pitch_angle_start = _param_sens_zk_pitch_s.get();
             _takeoff_pitch_angle_finish = _param_sens_zk_pitch_f.get();
+
+            user_channel = _param_sens_zk_ksw_ch.get();
+            _takeoff_killswitch_channel_num = (user_channel >= 0 && user_channel <= 16) ? user_channel - 1 : -1;
         }
 
 //        // 1.2. Получение номера выхода для управления рулём тангажа
@@ -92,6 +96,7 @@ int ZKTurbine::task_main()
             {
                 _is_takeoff = current_takeoff;
                 _current_takeoff_state = _is_takeoff ? TakeoffState::SetIdle : TakeoffState::NoTakeoff;
+                PX4_INFO("TakeoffState: %s", _is_takeoff ? "set idle" : "no takeoff");
                 if (_is_takeoff)
                     _takeoff_state_timeout = hrt_absolute_time() + _takeoff_idle_timeout;
             }
@@ -104,11 +109,12 @@ int ZKTurbine::task_main()
             float raw_value = outputs.output[_last_out_channel_num]; // Получаем значение с нужного нам канала вывода
 
             // Универсальная логика определения состояния: если значение близко к 1 (чистый GPIO High) ИЛИ больше 1500 (ШИМ max)
-            bool turbine_should_on = (raw_value > 0.5f && raw_value < 2.0f) || raw_value > 1500.0f;
+            bool turbine_should_on = (raw_value > 0.5f && raw_value < 2.0f) || raw_value > 999.0f;
             if (turbine_should_on != _is_work)
+            {
                 _is_work = turbine_should_on;
-
-            PX4_INFO("Activating: %s", turbine_should_on ? "ON" : "OFF");
+                PX4_INFO("Activating: %s", turbine_should_on ? "ON" : "OFF");
+            }
 
             _current_pitch_angle = outputs.output[_pitch_channel] * 180;
         }
@@ -125,7 +131,7 @@ int ZKTurbine::task_main()
         {
             sensor_combined_s imu;
             if (_sensor_combined_sub.copy(&imu))
-                _current_z_overdrive = imu.accelerometer_m_s2[2];
+                _current_x_overdrive = abs(imu.accelerometer_m_s2[0]);
         }
 
         // 2. Расчёт данных для отправки в турбину
@@ -137,16 +143,28 @@ int ZKTurbine::task_main()
         }
 
         // 2.2. Управление взлётом (здесь может заменяться значение подаваемого газа)
-        if (_is_takeoff && m_mode == SW_1::ControlEngineIntoRunningState)
+        if (_is_takeoff && m_mode == SW_1::ControlEngineIntoRunningState) // Если режим взлёта и турбина включена (соответственно заармелена и включен рабочий режим)
         {
             // Этап 1. Выход на холостые обороты
             if (_current_takeoff_state == TakeoffState::SetIdle)
             {
+                static uint64_t wait_time = 0;
                 m_setThrottle = 0;
                 if (m_rpm <= _takeoff_idle_speed)
                 {
-                    _current_takeoff_state = TakeoffState::SetMaxSpeed;
-                    _takeoff_state_timeout = hrt_absolute_time() + _takeoff_max_rpm_timeout;
+                    if (wait_time == 0) // Не назначили время ожидания работы на холостом ходу
+                    {
+                        wait_time = hrt_absolute_time() + _takeoff_idle_time;
+                        _takeoff_state_timeout+= _takeoff_idle_time + 1000000; // Чтобы не было проблемы из-за того, что осталось меньше, чем нужно поработать
+                    }
+
+                    if (wait_time <= hrt_absolute_time())
+                    {
+                        wait_time = 0;
+                        _current_takeoff_state = TakeoffState::SetMaxSpeed;
+                        PX4_INFO("TakeoffState: %s", "set max speed");
+                        _takeoff_state_timeout = hrt_absolute_time() + _takeoff_max_rpm_timeout;
+                    }
                 }
             }
 
@@ -156,9 +174,36 @@ int ZKTurbine::task_main()
                 m_setThrottle = 1000;
                 if (m_rpm <= _takeoff_max_rpm_speed)
                 {
-                    _current_takeoff_state = TakeoffState::SetKillswitch;
-                    _takeoff_state_timeout = hrt_absolute_time() + _takeoff_z_overdrive_timeout;
-                    _is_overdrive = false;
+//                    _current_takeoff_state = TakeoffState::SetKillswitch;
+//                    PX4_INFO("TakeoffState: %s", "overdrive by x-axis.");
+//                    _takeoff_state_timeout = hrt_absolute_time() + _takeoff_x_overdrive_timeout;
+//                    _is_overdrive = false;
+//
+//                    if (_takeoff_killswitch_channel_num != -1)
+//                    {
+//                        sendServo(_takeoff_killswitch_channel_num, 1.0f);
+//                        _takeoff_killswitch_timeout = hrt_absolute_time() + 2000000;
+//                    }
+//                    else
+//                    {
+//                        PX4_ERR("TakeoffState: ERROR! No killswitch output number");
+//                        _takeoff_state_timeout = hrt_absolute_time() - 1;
+//                    }
+
+                    PX4_INFO("TakeoffState: %s", "set stab.");
+                    sendServo(_takeoff_killswitch_channel_num, 1.0f);
+                    vehicle_command_s cmd{};
+                    cmd.timestamp = hrt_absolute_time();
+                    cmd.command = vehicle_command_s::VEHICLE_CMD_DO_SET_MODE; // MAV_CMD_DO_SET_MODE
+                    cmd.param1 = 1.0f; // MAV_MODE_FLAG_CUSTOM_MODE_ENABLED - базовый режим (для кастомных режимов PX4 всегда 1.0)
+                    cmd.param2 = 1.0f; // PX4_CUSTOM_MAIN_MODE_STABILIZED (Main Mode = 1)
+                    cmd.param3 = 0.0f; // Sub Mode для Stabilized отсутствует (0.0f)
+                    cmd.target_system = 1;
+                    cmd.target_component = 1;
+                    cmd.source_system = 1;
+                    cmd.source_component = 1; // Можно указать компонент вашего драйвера
+                    cmd.from_external = false; // Важно: команда генерируется внутри прошивки
+                    _vehicle_command_pub.publish(cmd);
                 }
             }
 
@@ -166,21 +211,22 @@ int ZKTurbine::task_main()
             static uint64_t overdrive_time = 0;
             if (_current_takeoff_state == TakeoffState::SetKillswitch)
             {
-                // ТУДУ: нужно отправить команду на поджиг
-                if (_current_z_overdrive > _takeoff_z_overdrive)
+                if (_takeoff_killswitch_timeout < hrt_absolute_time())
+                    sendServo(_takeoff_killswitch_channel_num, 0.0f);
+
+                if (_current_x_overdrive > _takeoff_x_overdrive)
                 {
                     if (overdrive_time == 0)
-                        overdrive_time = hrt_absolute_time() + _takeoff_z_overdrive_time;
+                        overdrive_time = hrt_absolute_time() + _takeoff_x_overdrive_time;
 
                     _is_overdrive = hrt_absolute_time() > overdrive_time;
 
                     if (_is_overdrive)
                     {
                         _current_takeoff_state = TakeoffState::Pitching;
+                        PX4_INFO("TakeoffState: %s", "pitch control");
                         _takeoff_state_timeout = UINT64_MAX;
-                        actuator_servos_s msg{};
-                        msg.control[_pitch_channel] = (_takeoff_pitch_angle_start / 180.0f);
-                        _actuator_servos_pub.publish(msg);
+                        sendServo(_pitch_channel, _takeoff_pitch_angle_start / 180.0f);
                     }
                 }
                 else
@@ -192,6 +238,7 @@ int ZKTurbine::task_main()
             {
                 if (_current_pitch_angle > _takeoff_pitch_angle_finish)
                 {
+                    PX4_INFO("TakeoffState: %s", "takeoff finish");
                     vehicle_command_s cmd{};
                     cmd.timestamp = hrt_absolute_time();
                     cmd.command = vehicle_command_s::VEHICLE_CMD_DO_SET_MODE; // MAV_CMD_DO_SET_MODE
@@ -207,12 +254,11 @@ int ZKTurbine::task_main()
                 }
             }
 
+            // Обработка ошибки и выхода из режима взлёта
             if (hrt_absolute_time() > _takeoff_state_timeout)
             {
-                // Выключение входа для is working
-                actuator_servos_s msg{};
-                msg.control[_last_out_channel_num] = 0;
-                _actuator_servos_pub.publish(msg);
+                PX4_ERR("TakeoffState: %s", "takeoff fail");
+                sendServo(_last_out_channel_num, 0.0f);// Выключение входа для is working
 
                 // ТУДУ: (Это правильно?????) Отправка в режим Hold (Loiter)
                 vehicle_command_s cmd{};
@@ -385,8 +431,8 @@ bool ZKTurbine::checkPacket(const ReceivePacket &p) const
 
 void ZKTurbine::parseData(ReceivePacket p)
 {
-    PX4_INFO("Parsing data: ID=%d",p.data.Command);
     m_rpm = (uint32_t)p.data.RPM * 10;
+
     switch ((ReadCommand)p.data.Command)
     {
         case ReadCommand::ID_1:
@@ -582,9 +628,10 @@ void ZKTurbine::sendTelemetry()
 	efi.exhaust_gas_temperature             = m_exhTemperature;
 	efi.lambda_coefficient                  = 0;
 //	efi.pid_idle_rpm_integral
-	efi.state                               = (m_error != ErrorCode::NoError) ? internal_combustion_engine_status_s::STATE_FAULT :
-                                              (m_state == EngineStatusCode::Stop) ? internal_combustion_engine_status_s::STATE_STOPPED :
-                                              internal_combustion_engine_status_s::STATE_RUNNING;
+	efi.state                               = (uint8_t)m_state;
+                                              //(m_error != ErrorCode::NoError) ? internal_combustion_engine_status_s::STATE_FAULT :
+                                              //(m_state == EngineStatusCode::Stop) ? internal_combustion_engine_status_s::STATE_STOPPED :
+                                              //internal_combustion_engine_status_s::STATE_RUNNING;
 	efi.substate                            = (!_is_armed) ? internal_combustion_engine_status_s::SUBSTATE_REST :
                                               (_is_work) ? internal_combustion_engine_status_s::SUBSTATE_RUN :
                                               internal_combustion_engine_status_s::SUBSTATE_IDLE;
@@ -654,6 +701,17 @@ void ZKTurbine::closePort()
         else
             PX4_ERR("Close port %s error: %d.", _port, errno);
     }
+}
+
+void ZKTurbine::sendServo(int32_t num, float val)
+{
+    if (num == -1) return;
+
+    actuator_servos_s msg{};
+    msg.timestamp = hrt_absolute_time();
+    for (int i = 0;i < actuator_servos_s::NUM_CONTROLS;i++)
+        msg.control[i] = (i == num) ? val : NAN;
+    _actuator_servos_pub.publish(msg);
 }
 
 int ZKTurbine::task_spawn(int argc, char *argv[])

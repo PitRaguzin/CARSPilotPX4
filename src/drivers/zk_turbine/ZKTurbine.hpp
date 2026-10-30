@@ -343,9 +343,6 @@ private:
     };
 /////////////////////////////// ЧТЕНИЕ ДАННЫХ (конец) ////////////////////////////////
 
-    /// @brief обработчик изменения состояния параметров управления включением работы турбины
-    void updateControlOutput();
-
     /// @brief Проверка целостности принятого пакета
     /// @param p Принятый пакет
     /// @return Результат проверки целостности
@@ -368,6 +365,9 @@ private:
     /// @brief Закрытие последовательного порта
     void closePort();
 
+    /// @brief Отправка данных на нужный выход
+    void sendServo(int32_t num, float val);
+
     const float g = 9.81;               ///< Ускорение свободного падения, м/с^2
 
     char _port[32];                     ///< Имя порта UART в системе
@@ -389,18 +389,21 @@ private:
         SetKillswitch = 3,
         Pitching = 4
     } _current_takeoff_state{TakeoffState::NoTakeoff};  ///< Текущий этап взлёта
-    uint64_t _takeoff_idle_timeout;         ///< Время установки обротов турбины в значение холостого хода, мкс
-    uint64_t _takeoff_idle_speed;           ///< Значение RPM для обротов холостого хода
-    uint64_t _takeoff_max_rpm_timeout;      ///< Время установки обротов турбины в значение максимального газа, мкс
-    uint64_t _takeoff_max_rpm_speed;        ///< Значение RPM для обротов максимального газа
-    float _takeoff_z_overdrive;             ///< Перегрузка по оси Z, м/с^2
-    uint64_t _takeoff_z_overdrive_timeout;  ///< Время ожидания перегрузки по оси Z, с
-    uint64_t _takeoff_z_overdrive_time;     ///< Время перегрузки по оси Z, с
-    float _takeoff_pitch_angle_start;       ///< Угол тангажа на начало взлёта, град
-    float _takeoff_pitch_angle_finish;      ///< Угол тангажа на окончание взлёта, град
-    bool _is_overdrive{false};              ///< Флаг наличия указанной перегрузки
-    float _current_z_overdrive;             ///< Текущее ускорение по оси Z, м/с^2
-    float _current_pitch_angle;             ///< Текуший угол тангажа, град
+    uint64_t _takeoff_idle_timeout;                 ///< Время установки обротов турбины в значение холостого хода, мкс
+    uint64_t _takeoff_idle_time;                    ///< Время работы турбины на холостом ходу, мкс
+    uint64_t _takeoff_idle_speed;                   ///< Значение RPM для обротов холостого хода
+    uint64_t _takeoff_max_rpm_timeout;              ///< Время установки обротов турбины в значение максимального газа, мкс
+    uint64_t _takeoff_max_rpm_speed;                ///< Значение RPM для обротов максимального газа
+    float _takeoff_x_overdrive;                     ///< Перегрузка по оси X, м/с^2
+    uint64_t _takeoff_x_overdrive_timeout;          ///< Время ожидания перегрузки по оси X, с
+    uint64_t _takeoff_x_overdrive_time;             ///< Время перегрузки по оси X, с
+    float _takeoff_pitch_angle_start;               ///< Угол тангажа на начало взлёта, град
+    float _takeoff_pitch_angle_finish;              ///< Угол тангажа на окончание взлёта, град
+    bool _is_overdrive{false};                      ///< Флаг наличия указанной перегрузки
+    float _current_x_overdrive;                     ///< Текущее ускорение по оси X, м/с^2
+    float _current_pitch_angle;                     ///< Текуший угол тангажа, град
+    int32_t _takeoff_killswitch_channel_num{-1};    ///< Канал для включения ШИМ поджига (killswitch)
+    uint64_t _takeoff_killswitch_timeout{0};        ///< Время удержания ШИМ поджига (killswitch), с
 
     uORB::Publication<internal_combustion_engine_status_s> _efi_status_pub{ORB_ID(internal_combustion_engine_status)};
     uORB::Publication<actuator_servos_s> _actuator_servos_pub{ORB_ID(actuator_servos)};
@@ -414,14 +417,16 @@ private:
     DEFINE_PARAMETERS(
         (ParamInt<px4::params::SENS_ZK_OUT_CH>) _param_sens_zk_out_ch,
         (ParamInt<px4::params::SENS_ZK_IDLE_T>) _param_sens_zk_idle_t,
+        (ParamInt<px4::params::SENS_ZK_IDLE_TO>) _param_sens_zk_idle_to,
         (ParamInt<px4::params::SENS_ZK_IDLE_SP>) _param_sens_zk_idle_sp,
-        (ParamInt<px4::params::SENS_ZK_MAX_T>) _param_sens_zk_max_t,
+        (ParamInt<px4::params::SENS_ZK_MAX_TO>) _param_sens_zk_max_to,
         (ParamInt<px4::params::SENS_ZK_MAX_SP>) _param_sens_zk_max_sp,
         (ParamFloat<px4::params::SENS_ZK_OVERDRV>) _param_sens_zk_overdrv,
         (ParamFloat<px4::params::SENS_ZK_OVDR_TO>) _param_sens_zk_ovdr_to,
         (ParamFloat<px4::params::SENS_ZK_OVDRV_T>) _param_sens_zk_ovdrv_t,
         (ParamFloat<px4::params::SENS_ZK_PITCH_S>) _param_sens_zk_pitch_s,
-        (ParamFloat<px4::params::SENS_ZK_PITCH_F>) _param_sens_zk_pitch_f
+        (ParamFloat<px4::params::SENS_ZK_PITCH_F>) _param_sens_zk_pitch_f,
+        (ParamInt<px4::params::SENS_ZK_KSW_CH>) _param_sens_zk_ksw_ch
     )
 
     SW_1 m_mode = SW_1::ControlEngineIntoStopState; ///< Значение режима, отправляемое в ECU
